@@ -24,6 +24,34 @@ const { useState, useEffect, Component } = React;
 // ----------------------------------------------------------------------------
 // CHANGELOG
 //
+// v15
+//   - Full split restructure: Push (Mon heavy / Thu light), Pull (Tue heavy /
+//     Fri light), Legs A · Quads (Wed), Legs B · Hams & Glutes (Sat).
+//     Full Body day removed, redundant once every group is hit twice a week.
+//   - Heavy days run 4-5 rep compounds, light days run 12-15 rep isolation
+//     work, same muscle groups, different stimulus each visit.
+//   - Sunday is now a Flex Day instead of a hard rest day: shows a missed
+//     day as a one-tap makeup if you have one, else flags any 5RM that
+//     hasn't been logged in about 4 weeks as due for max testing, else
+//     falls back to an optional light core + cardio session. Manual
+//     override always available to jump to any day regardless.
+//   - Saturday gets a second, bigger CORE FINISHER block (4 new exercises)
+//     on top of the regular daily core, per your call to keep both.
+//   - Warm-up guidance added to both Legs days as a banner note.
+//   - Deload week banner: auto-suggested every 6 weeks from first use of
+//     this version, dismissible, resets weekly.
+//   - Exercise weight log reworked: explicit "Log this weight" button
+//     instead of live-typing saves, plus a last-3-sessions trend strip so
+//     progressive overload is visible without scrolling old notes.
+//   - Session effort tag (Easy/Moderate/Hard) captured on the Results tab
+//     for your most recent workout.
+//   - Export My Data button added to Progress tab, downloads a full JSON
+//     backup independent of GitHub/device.
+//   - MaxTracker bugfix: Save was silently refreshing the "last logged"
+//     date on every compound lift, even ones you didn't touch. Now only
+//     lifts you actually edit get a new date, which is what the Sunday
+//     max-testing nudge depends on.
+//
 // v14
 //   - Bugfix: workout was marking itself "complete" (XP + calorie toast)
 //     as soon as the last LIFT exercise got checked, before core or
@@ -106,7 +134,7 @@ const { useState, useEffect, Component } = React;
 // DATA LAYER
 // ============================================================================
 
-const APP_VERSION = "v14";
+const APP_VERSION = "v15";
 
 // Storage key is intentionally NOT tied to APP_VERSION.
 // Bumping the version must never wipe the weight log, 5RMs, or logged weights.
@@ -116,6 +144,7 @@ function loadData() {
   const defaults = {
     weights: {}, maxes: {}, missed: {}, difficulty: {}, coreSkip: {}, quickCoreLog: {},
     checks: {}, nutritionLog: {}, xp: 0, xpLog: {}, coreMode: {}, customSetsReps: {},
+    exerciseHistory: {}, deloadAckWeek: null, programStartDate: new Date().toISOString(),
     activeSession: null, sessionLog: {},
     profile: { age: 31, goalWeight: 180 },
     weightLog: [{ date: "Jul 2025", weight: 206.6 }],
@@ -322,29 +351,26 @@ const universalStretches = [
 ];
 
 const stretchGroups = {
-  "Chest & Back": [
+  push: [
     { name: "Doorway Chest Stretch", detail: "30 sec each arm position" },
     { name: "Cross-Body Shoulder Stretch", detail: "30 sec each arm" },
+    { name: "Overhead Tricep Stretch", detail: "30 sec each arm" },
+  ],
+  pull: [
     { name: "Cat-Cow", detail: "10 slow reps" },
     { name: "Thread the Needle", detail: "30 sec each side" },
-  ],
-  "Arms & Shoulders": [
     { name: "Wrist Flexor Stretch", detail: "20 sec each arm" },
-    { name: "Wrist Extensor Stretch", detail: "20 sec each arm" },
-    { name: "Overhead Tricep Stretch", detail: "30 sec each arm" },
-    { name: "Cross-Body Shoulder Stretch", detail: "30 sec each arm" },
+    { name: "Cross-Body Shoulder Stretch", detail: "20 sec each arm" },
   ],
-  "Legs & Glutes": [
+  legsA: [
     { name: "Kneeling Hip Flexor Stretch", detail: "30 sec each side" },
-    { name: "Standing Hamstring Stretch", detail: "30 sec each leg" },
-    { name: "Ankle Dorsiflexion Rock", detail: "10 reps each side" },
-    { name: "Figure-4 Glute Stretch", detail: "30 sec each side" },
+    { name: "Standing Quad Stretch", detail: "20 sec each leg" },
     { name: "Bodyweight Deep Squat Hold", detail: "30-45 sec, hold support if needed" },
   ],
-  "Full Body": [
-    { name: "Standing Quad Stretch", detail: "20 sec each leg" },
-    { name: "Seated Hamstring Stretch", detail: "20 sec each leg" },
-    { name: "Cross-Body Shoulder Stretch", detail: "20 sec each arm" },
+  legsB: [
+    { name: "Standing Hamstring Stretch", detail: "30 sec each leg" },
+    { name: "Figure-4 Glute Stretch", detail: "30 sec each side" },
+    { name: "Ankle Dorsiflexion Rock", detail: "10 reps each side" },
   ],
 };
 
@@ -367,192 +393,164 @@ const coreExercisesFull = [
 
 const days = [
   {
-    id: 1, label: "Mon", title: "Chest & Back",
+    id: 1, label: "Mon", title: "Push (Heavy)", stretchKey: "push",
     sections: [
       {
         name: "CHEST", color: "#3b82f6",
         exercises: [
           {
-            name: "Chest Press", sets: 3, reps: 15, muscles: ["Chest", "Triceps", "Front Shoulders"], restType: "compound", maxKey: null,
+            name: "Chest Press", sets: 4, reps: "5-8", muscles: ["Chest", "Triceps", "Front Shoulders"], restType: "compound", maxKey: "bench",
             tiers: {
               beginner: { name: "Seated Chest Press (Machine)", equipment: "Seated press machine, chest position", howto: ["Sit at the seated press machine, set to the chest press position from the picture chart.", "Grip handles at chest height.", "Press forward until arms extend.", "Return slowly, control the weight back.", "Keep your back against the pad the whole time."] },
               intermediate: { name: "Dumbbell Bench Press", equipment: "Dumbbells + Bench", howto: ["Lie flat on bench, feet on floor.", "Hold dumbbells above chest, palms forward.", "Lower slowly until elbows hit 90 degrees.", "Press back up, exhale at the top.", "Keep back flat. Do not arch."] },
               advanced: { name: "Barbell Bench Press", equipment: "Squat rack + barbell + bench", howto: ["Lie flat on the bench in the rack, grip bar slightly wider than shoulders.", "Unrack and lower to mid-chest.", "Keep elbows at 45 degrees from body.", "Press back up, exhale at the top.", "Do not bounce bar off your chest."] },
             }
           },
-          { name: "Incline Dumbbell Fly", sets: 3, reps: 12, muscles: ["Upper Chest", "Front Shoulders"], equipment: "Incline Bench + Dumbbells", restType: "isolation", maxKey: null, howto: ["Set bench to 30-45 degree incline.", "Hold dumbbells above chest, slight elbow bend.", "Open arms wide in an arc until you feel a stretch.", "Bring dumbbells back together at the top.", "Think hugging a barrel, not pressing."] },
-          { name: "Cable Chest Fly - Low", sets: 3, reps: 15, muscles: ["Lower Chest"], equipment: "Adjustable pulley station, set high", restType: "isolation", maxKey: null, howto: ["Set both pulleys to the highest position on the tower, attach handles.", "Stand in the middle, step one foot forward.", "Pull both handles down and together in front of your hips.", "Keep a slight bend in your elbows the whole time.", "Squeeze your lower chest as your hands meet."] },
-        ]
-      },
-      {
-        name: "BACK", color: "#8b5cf6",
-        exercises: [
-          {
-            name: "Seated Cable Row", sets: 3, reps: 15, muscles: ["Mid Back", "Biceps", "Rear Shoulders"], restType: "compound", maxKey: "cablerow",
-            tiers: {
-              beginner: { name: "Seated Cable Row (Light, Supported)", equipment: "Adjustable pulley station, set low, rope", howto: ["Set the pulley to the lowest position, attach the rope.", "Sit on the floor or a bench facing the tower, knees slightly bent.", "Grip rope ends with palms facing each other.", "Pull the rope into your stomach, elbows close.", "Return slowly with control."] },
-              intermediate: { name: "Seated Cable Row (Rope)", equipment: "Adjustable pulley station, set low, rope", howto: ["Set the pulley low, attach the rope.", "Sit facing the tower, feet braced, knees slightly bent.", "Grip rope ends with palms facing each other.", "Pull rope into your lower stomach, splitting hands apart at the end.", "Squeeze shoulder blades. Return slowly."] },
-              advanced: { name: "Barbell Bent-Over Row", equipment: "Squat rack + barbell", howto: ["Take the bar from the rack, hinge forward at hips to 45 degrees.", "Grip bar just outside your legs.", "Pull bar into your lower stomach.", "Squeeze shoulder blades at the top.", "Keep back straight. Do not round."] },
-            }
-          },
-          { name: "High Cable Rope Pulldown", sets: 3, reps: 12, muscles: ["Lats", "Mid Back", "Biceps"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the highest position, attach the rope.", "Kneel or sit facing the tower.", "Pull the rope down toward your chest, splitting hands as you pull.", "Lead with your elbows driving down and back.", "Squeeze your lats at the bottom, return slowly."] },
-          { name: "Dumbbell Bent-Over Row", sets: 3, reps: 12, muscles: ["Mid Back", "Lats", "Biceps"], equipment: "Dumbbells + Bench", restType: "isolation", maxKey: null, howto: ["Place one knee and hand on bench.", "Hold dumbbell in opposite hand, arm hanging.", "Pull dumbbell up toward your hip, elbow close.", "Squeeze your back at the top.", "Lower slowly. Back parallel to floor."] },
-        ]
-      }
-    ]
-  },
-  {
-    id: 2, label: "Tue", title: "Arms & Shoulders",
-    sections: [
-      {
-        name: "BICEPS", color: "#f59e0b",
-        exercises: [
-          { name: "Dumbbell Curl", sets: 3, reps: 15, muscles: ["Biceps"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand tall, dumbbells at sides, palms forward.", "Curl both dumbbells up toward shoulders.", "Keep elbows pinned at your sides.", "Squeeze at the top, lower slowly.", "Do not swing your back to get the weight up."] },
-          { name: "Cable Curl", sets: 3, reps: 15, muscles: ["Biceps", "Forearms"], equipment: "Adjustable pulley station, set low, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the lowest position, attach the rope.", "Stand close, grip rope ends with palms up.", "Curl the rope up to your chest.", "Keep elbows still and close to your body.", "The cable keeps tension at the bottom unlike dumbbells."] },
-        ]
-      },
-      {
-        name: "TRICEPS", color: "#ef4444",
-        exercises: [
-          { name: "Cable Tricep Pushdown", sets: 3, reps: 15, muscles: ["Triceps"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the highest position, attach the rope.", "Stand facing the tower, elbows at your sides at 90 degrees.", "Push straight down until your arms fully extend.", "Split the rope ends apart at the bottom for a full squeeze.", "Return slowly. Elbows stay pinned."] },
-          { name: "Overhead Dumbbell Tricep Extension", sets: 3, reps: 12, muscles: ["Triceps"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Sit or stand, hold one dumbbell overhead with both hands.", "Lower behind your head by bending only your elbows.", "Keep elbows pointing forward and close to your head.", "Press back up to start.", "Targets the part of the tricep visible from behind."] },
-        ]
-      },
-      {
-        name: "SHOULDERS", color: "#10b981",
-        exercises: [
-          { name: "Dumbbell Lateral Raise", sets: 3, reps: 15, muscles: ["Side Delts"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with dumbbells at sides, slight elbow bend.", "Raise both arms out to the sides to shoulder height.", "Lead with elbows, not hands.", "Lower slowly. No momentum.", "This creates shoulder width."] },
-          {
-            name: "Shoulder Press", sets: 3, reps: 12, muscles: ["Front Delts", "Side Delts", "Triceps"], restType: "compound", maxKey: null,
-            tiers: {
-              beginner: { name: "Seated Shoulder Press (Machine)", equipment: "Seated press machine, shoulder press position", howto: ["Sit at the seated press machine, set to the shoulder press position from the picture chart.", "Grip handles at shoulder height.", "Press straight up without locking out.", "Lower with control back to start.", "Back stays against the pad the whole time."] },
-              intermediate: { name: "Dumbbell Shoulder Press", equipment: "Dumbbells + Bench", howto: ["Sit on bench with back support, dumbbells at shoulder height.", "Press both dumbbells straight up.", "Do not lock out. Keep tension on shoulders.", "Lower to ear level and repeat.", "Keep core tight to protect lower back."] },
-              advanced: { name: "Barbell Overhead Press", equipment: "Squat rack + barbell", howto: ["Take the bar from the rack at shoulder height.", "Grip just outside your shoulders.", "Press bar straight up overhead.", "Do not lean back. Keep core braced.", "Lower back to shoulders with control."] },
-            }
-          },
-          { name: "Cable Face Pull", sets: 3, reps: 15, muscles: ["Rear Delts", "Upper Back"], equipment: "Adjustable pulley station, set to face height, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to face height, attach the rope.", "Pull the rope toward your face, hands splitting apart.", "Elbows flare out at shoulder height.", "Squeeze rear delts and hold briefly.", "Protects your shoulders and improves posture."] },
-        ]
-      }
-    ]
-  },
-  {
-    id: 3, label: "Wed", title: "Chest & Back",
-    sections: [
-      {
-        name: "CHEST", color: "#3b82f6",
-        exercises: [
-          {
-            name: "Chest Press", sets: 3, reps: 12, muscles: ["Chest", "Triceps", "Front Shoulders"], restType: "compound", maxKey: "bench",
-            tiers: {
-              beginner: { name: "Seated Chest Press (Machine)", equipment: "Seated press machine, chest position", howto: ["Sit at the seated press machine, set to chest press.", "Grip handles at chest height.", "Press forward until arms extend.", "Return slowly.", "Back stays against the pad."] },
-              intermediate: { name: "Dumbbell Bench Press", equipment: "Dumbbells + Bench", howto: ["Lie flat, dumbbells above chest, palms forward.", "Lower until elbows hit 90 degrees.", "Press back up, exhale at the top.", "Keep back flat.", "Control the weight down every rep."] },
-              advanced: { name: "Barbell Bench Press", equipment: "Squat rack + barbell + bench", howto: ["Lie flat, grip bar slightly wider than shoulders.", "Unrack and lower to mid-chest.", "Keep elbows at 45 degrees from body.", "Press back up, exhale at the top.", "Do not bounce the bar off your chest."] },
-            }
-          },
-          { name: "Cable Crossover", sets: 3, reps: 15, muscles: ["Chest", "Front Shoulders"], equipment: "Adjustable pulley station, set high, rope or handles", restType: "isolation", maxKey: null, howto: ["Set both pulleys high on the tower.", "Stand in the middle, lean slightly forward.", "Pull both handles down and together in front of your hips.", "Keep a slight bend in your elbows the whole time.", "Squeeze your chest as your hands meet."] },
-          { name: "Cable Chest Fly - Straight/Mid", sets: 3, reps: 15, muscles: ["Mid Chest"], equipment: "Adjustable pulley station, set to chest height", restType: "isolation", maxKey: null, howto: ["Set both pulleys to chest height, straight across from your torso.", "Stand centered between the towers, step one foot forward.", "Pull both handles together directly in front of your chest.", "Keep a slight bend in your elbows throughout.", "Squeeze your chest at the center point."] },
-        ]
-      },
-      {
-        name: "BACK", color: "#8b5cf6",
-        exercises: [
-          { name: "Barbell Bent-Over Row", sets: 3, reps: 12, muscles: ["Mid Back", "Lats", "Biceps"], equipment: "Squat rack + barbell", restType: "compound", maxKey: "bbrow", howto: ["Take the bar from the rack, hinge forward at hips to 45 degrees.", "Grip bar just outside your legs.", "Pull bar into your lower stomach.", "Squeeze shoulder blades at the top.", "Keep back straight. Do not round."] },
-          { name: "Cable Straight-Arm Pulldown", sets: 3, reps: 15, muscles: ["Lats", "Core"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the highest position, attach the rope.", "Stand facing the tower, grip rope with straight arms.", "Hinge slightly at the hips.", "Pull the rope straight down to your thighs.", "Keep arms straight, feel your lats doing the work."] },
-          { name: "Seated Cable Row - Wide Grip", sets: 3, reps: 12, muscles: ["Upper Back", "Rear Shoulders"], equipment: "Adjustable pulley station, set low, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley low, attach the rope.", "Grip both ends, pull wide as you row.", "Pull the rope to your chest rather than your stomach.", "Squeeze upper back and rear shoulders.", "Hits upper back more than the standard close-grip row."] },
-        ]
-      }
-    ]
-  },
-  {
-    id: 4, label: "Thu", title: "Arms & Shoulders",
-    sections: [
-      {
-        name: "BICEPS", color: "#f59e0b",
-        exercises: [
-          { name: "Barbell Curl", sets: 3, reps: 12, muscles: ["Biceps", "Forearms"], equipment: "Squat rack + barbell", restType: "isolation", maxKey: null, howto: ["Take the bar, palms up, grip shoulder width.", "Curl bar up toward your chest.", "Keep elbows locked at your sides.", "Lower slowly all the way down.", "Full range of motion over heavy weight."] },
-          { name: "Hammer Curl", sets: 3, reps: 15, muscles: ["Biceps", "Brachialis", "Forearms"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Hold dumbbells at sides, palms facing your body.", "Curl up without rotating your wrist.", "Keep the hammer grip throughout.", "Lower slowly.", "Builds arm thickness, not just the peak."] },
-        ]
-      },
-      {
-        name: "TRICEPS", color: "#ef4444",
-        exercises: [
-          { name: "Skull Crushers", sets: 3, reps: 12, muscles: ["Triceps"], equipment: "Dumbbells + Bench", restType: "isolation", maxKey: null, howto: ["Lie flat, hold dumbbells above your chest, arms extended.", "Lower toward your forehead by bending only at the elbows.", "Keep upper arms vertical and still.", "Press back up to the start.", "Go light until form is solid."] },
-          { name: "Cable Kickback", sets: 3, reps: 15, muscles: ["Triceps"], equipment: "Adjustable pulley station, set low, single handle", restType: "isolation", maxKey: null, howto: ["Set the pulley to the lowest position, single handle attachment.", "Hinge forward, upper arm parallel to the floor.", "Extend your arm straight back until fully locked.", "Squeeze the tricep at full extension.", "Return slowly. Keep your upper arm still."] },
+          { name: "Cable Crossover", sets: 3, reps: "8-10", muscles: ["Chest", "Front Shoulders"], equipment: "Adjustable pulley station, set high, rope or handles", restType: "isolation", maxKey: null, howto: ["Set both pulleys high on the tower.", "Stand in the middle, lean slightly forward.", "Pull both handles down and together in front of your hips.", "Keep a slight bend in your elbows the whole time.", "Squeeze your chest as your hands meet."] },
         ]
       },
       {
         name: "SHOULDERS", color: "#10b981",
         exercises: [
           {
-            name: "Overhead Press", sets: 3, reps: 12, muscles: ["Front Delts", "Side Delts", "Triceps"], restType: "compound", maxKey: "ohp",
+            name: "Overhead Press", sets: 4, reps: "5-8", muscles: ["Front Delts", "Side Delts", "Triceps"], restType: "compound", maxKey: "ohp",
             tiers: {
               beginner: { name: "Seated Shoulder Press (Machine)", equipment: "Seated press machine, shoulder press position", howto: ["Sit at the seated press machine, set to shoulder press.", "Grip handles at shoulder height.", "Press straight up without locking out.", "Lower with control.", "Back stays against the pad."] },
               intermediate: { name: "Dumbbell Shoulder Press", equipment: "Dumbbells + Bench", howto: ["Sit with back support, dumbbells at shoulder height.", "Press straight up.", "Do not lock out.", "Lower to ear level.", "Keep core tight."] },
               advanced: { name: "Barbell Overhead Press", equipment: "Squat rack + barbell", howto: ["Take the bar at shoulder height.", "Grip just outside shoulders.", "Press straight up overhead.", "Do not lean back, brace your core.", "Lower with control."] },
             }
           },
-          { name: "Dumbbell Front Raise", sets: 3, reps: 12, muscles: ["Front Delts"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with dumbbells in front of your thighs, palms back.", "Raise dumbbells straight in front to shoulder height.", "Keep arms nearly straight.", "Lower slowly.", "Do not rock your body to swing the weight up."] },
-          { name: "Cable Lateral Raise", sets: 3, reps: 15, muscles: ["Side Delts"], equipment: "Adjustable pulley station, set low, single handle", restType: "isolation", maxKey: null, howto: ["Set the pulley to the lowest position.", "Stand beside the tower, hold the handle with your far hand.", "Raise your arm out to the side to shoulder height.", "Slight bend in the elbow.", "Lower slowly. Cable keeps tension at the bottom."] },
+          { name: "Dumbbell Lateral Raise", sets: 3, reps: "10-12", muscles: ["Side Delts"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with dumbbells at sides, slight elbow bend.", "Raise both arms out to the sides to shoulder height.", "Lead with elbows, not hands.", "Lower slowly. No momentum.", "This creates shoulder width."] },
+        ]
+      },
+      {
+        name: "TRICEPS", color: "#ef4444",
+        exercises: [
+          { name: "Skull Crushers", sets: 3, reps: "8-10", muscles: ["Triceps"], equipment: "Dumbbells + Bench", restType: "isolation", maxKey: null, howto: ["Lie flat, hold dumbbells above your chest, arms extended.", "Lower toward your forehead by bending only at the elbows.", "Keep upper arms vertical and still.", "Press back up to the start.", "Go light until form is solid."] },
+          { name: "Cable Tricep Pushdown", sets: 3, reps: "10-12", muscles: ["Triceps"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the highest position, attach the rope.", "Stand facing the tower, elbows at your sides at 90 degrees.", "Push straight down until your arms fully extend.", "Split the rope ends apart at the bottom for a full squeeze.", "Return slowly. Elbows stay pinned."] },
         ]
       }
     ]
   },
   {
-    id: 5, label: "Fri", title: "Legs & Glutes",
+    id: 2, label: "Tue", title: "Pull (Heavy)", stretchKey: "pull",
+    sections: [
+      {
+        name: "BACK", color: "#8b5cf6",
+        exercises: [
+          {
+            name: "Seated Cable Row", sets: 4, reps: "5-8", muscles: ["Mid Back", "Biceps", "Rear Shoulders"], restType: "compound", maxKey: "cablerow",
+            tiers: {
+              beginner: { name: "Seated Cable Row (Light, Supported)", equipment: "Adjustable pulley station, set low, rope", howto: ["Set the pulley to the lowest position, attach the rope.", "Sit on the floor or a bench facing the tower, knees slightly bent.", "Grip rope ends with palms facing each other.", "Pull the rope into your stomach, elbows close.", "Return slowly with control."] },
+              intermediate: { name: "Seated Cable Row (Rope)", equipment: "Adjustable pulley station, set low, rope", howto: ["Set the pulley low, attach the rope.", "Sit facing the tower, feet braced, knees slightly bent.", "Grip rope ends with palms facing each other.", "Pull rope into your lower stomach, splitting hands apart at the end.", "Squeeze shoulder blades. Return slowly."] },
+              advanced: { name: "Barbell Bent-Over Row", equipment: "Squat rack + barbell", howto: ["Take the bar from the rack, hinge forward at hips to 45 degrees.", "Grip bar just outside your legs.", "Pull bar into your lower stomach.", "Squeeze shoulder blades at the top.", "Keep back straight. Do not round."] },
+            }
+          },
+          { name: "High Cable Rope Pulldown", sets: 4, reps: "6-8", muscles: ["Lats", "Mid Back", "Biceps"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the highest position, attach the rope.", "Kneel or sit facing the tower.", "Pull the rope down toward your chest, splitting hands as you pull.", "Lead with your elbows driving down and back.", "Squeeze your lats at the bottom, return slowly."] },
+        ]
+      },
+      {
+        name: "BICEPS", color: "#f59e0b",
+        exercises: [
+          { name: "Barbell Curl", sets: 4, reps: "6-8", muscles: ["Biceps", "Forearms"], equipment: "Squat rack + barbell", restType: "isolation", maxKey: null, howto: ["Take the bar, palms up, grip shoulder width.", "Curl bar up toward your chest.", "Keep elbows locked at your sides.", "Lower slowly all the way down.", "Full range of motion over heavy weight."] },
+          { name: "Hammer Curl", sets: 3, reps: "8-10", muscles: ["Biceps", "Brachialis", "Forearms"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Hold dumbbells at sides, palms facing your body.", "Curl up without rotating your wrist.", "Keep the hammer grip throughout.", "Lower slowly.", "Builds arm thickness, not just the peak."] },
+        ]
+      }
+    ]
+  },
+  {
+    id: 3, label: "Wed", title: "Legs A · Quads", stretchKey: "legsA",
+    note: "Warm up first: an empty-bar or bodyweight set, then one light-medium set, before jumping to working weight. Especially on Squat since you're just getting back into it.",
     sections: [
       {
         name: "QUADS", color: "#06b6d4",
         exercises: [
           {
-            name: "Squat", sets: 4, reps: 10, muscles: ["Quads", "Glutes", "Hamstrings", "Core"], restType: "compound", maxKey: "squat",
+            name: "Squat", sets: 4, reps: "6-8", muscles: ["Quads", "Glutes", "Hamstrings", "Core"], restType: "compound", maxKey: "squat",
             tiers: {
               beginner: { name: "Bulgarian Split Squat", equipment: "Dumbbells + Bench (back foot elevated)", howto: ["Stand a few feet in front of a bench, rest one foot behind you on it.", "Hold dumbbells at your sides or bodyweight only to start.", "Lower your back knee toward the floor.", "Front knee stays over your ankle.", "Drive through your front heel to stand. This is your starting tier since you haven't squatted in years."] },
               intermediate: { name: "Goblet Squat", equipment: "Dumbbells", howto: ["Hold one dumbbell vertically at your chest with both hands.", "Feet shoulder width, toes slightly out.", "Squat down keeping your chest tall and elbows inside your knees.", "Drive through your heels to stand.", "Move here once Bulgarian split squats feel fully controlled, 1-2 weeks."] },
               advanced: { name: "Barbell Back Squat", equipment: "Squat rack + barbell", howto: ["Set the bar at shoulder height on the rack.", "Step under the bar, rest it across your upper back, not your neck.", "Feet shoulder width, toes slightly out.", "Unrack, step back, squat until thighs are parallel to the floor.", "Drive through your heels to stand. Keep your chest up throughout."] },
             }
           },
-          { name: "Leg Press", sets: 3, reps: 15, muscles: ["Quads", "Glutes", "Hamstrings"], equipment: "Leg press machine", restType: "compound", maxKey: "legpress", howto: ["Sit in the leg press, feet shoulder width on the platform.", "Lower the platform until knees hit 90 degrees.", "Press back up without locking your knees out.", "Keep your lower back against the seat.", "Do not let your knees cave inward."] },
-          { name: "Dumbbell Lunges", sets: 3, reps: 12, muscles: ["Quads", "Glutes", "Hamstrings"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with dumbbells at your sides.", "Step one foot forward and lower your back knee toward the floor.", "Front knee stays over your ankle.", "Push through your front heel to return.", "Alternate legs each rep."] },
-        ]
-      },
-      {
-        name: "HAMSTRINGS & GLUTES", color: "#84cc16",
-        exercises: [
-          { name: "Romanian Deadlift", sets: 3, reps: 12, muscles: ["Hamstrings", "Glutes", "Lower Back"], equipment: "Dumbbells or barbell", restType: "compound", maxKey: "rdl", howto: ["Stand with weight in front of your thighs.", "Hinge at the hips, pushing them back.", "Lower the weight along your legs until you feel a hamstring stretch.", "Drive hips forward to return to standing.", "Keep your back flat and knees soft throughout."] },
-          { name: "Leg Curl", sets: 3, reps: 15, muscles: ["Hamstrings"], equipment: "Leg curl/extension machine, curl side", restType: "isolation", maxKey: null, howto: ["Sit or lie at the leg curl and extension machine, set to the curl position.", "Position the pad behind your ankles.", "Curl your legs toward your glutes.", "Squeeze your hamstrings at the top.", "Lower slowly, do not let the weight drop."] },
-          { name: "Dumbbell Sumo Squat", sets: 3, reps: 15, muscles: ["Glutes", "Inner Thighs", "Quads"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with feet wider than shoulder width, toes pointed out.", "Hold one dumbbell with both hands between your legs.", "Squat straight down, keeping your chest tall.", "Drive through your heels to stand.", "Squeeze your glutes hard at the top."] },
+          { name: "Leg Press", sets: 4, reps: "8-10", muscles: ["Quads", "Glutes", "Hamstrings"], equipment: "Leg press machine", restType: "compound", maxKey: "legpress", howto: ["Sit in the leg press, feet shoulder width on the platform.", "Lower the platform until knees hit 90 degrees.", "Press back up without locking your knees out.", "Keep your lower back against the seat.", "Do not let your knees cave inward."] },
+          { name: "Dumbbell Lunges", sets: 3, reps: "10-12", muscles: ["Quads", "Glutes", "Hamstrings"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with dumbbells at your sides.", "Step one foot forward and lower your back knee toward the floor.", "Front knee stays over your ankle.", "Push through your front heel to return.", "Alternate legs each rep."] },
         ]
       }
     ]
   },
   {
-    id: 6, label: "Sat", title: "Full Body", note: "Legs kept light today. Upper body at full effort.",
+    id: 4, label: "Thu", title: "Push (Light)", stretchKey: "push",
     sections: [
       {
-        name: "CHEST & BACK", color: "#3b82f6",
+        name: "CHEST", color: "#3b82f6",
         exercises: [
-          { name: "Dumbbell Bench Press", sets: 3, reps: 12, muscles: ["Chest", "Triceps"], equipment: "Dumbbells + Bench", restType: "compound", maxKey: null, howto: ["Lie flat, dumbbells above chest, palms forward.", "Lower until elbows hit 90 degrees.", "Press back up, exhale at the top.", "Keep back flat.", "Control the weight down."] },
-          { name: "Seated Cable Row", sets: 3, reps: 12, muscles: ["Mid Back", "Biceps"], equipment: "Adjustable pulley station, set low, rope", restType: "compound", maxKey: null, howto: ["Grip rope ends with palms facing each other.", "Pull rope into your lower stomach.", "Split hands apart at the end of the pull.", "Squeeze shoulder blades.", "Return slowly."] },
+          { name: "Incline Dumbbell Fly", sets: 3, reps: "12-15", muscles: ["Upper Chest", "Front Shoulders"], equipment: "Incline Bench + Dumbbells", restType: "isolation", maxKey: null, howto: ["Set bench to 30-45 degree incline.", "Hold dumbbells above chest, slight elbow bend.", "Open arms wide in an arc until you feel a stretch.", "Bring dumbbells back together at the top.", "Think hugging a barrel, not pressing."] },
+          { name: "Cable Chest Fly - Low", sets: 3, reps: "12-15", muscles: ["Lower Chest"], equipment: "Adjustable pulley station, set high", restType: "isolation", maxKey: null, howto: ["Set both pulleys to the highest position on the tower, attach handles.", "Stand in the middle, step one foot forward.", "Pull both handles down and together in front of your hips.", "Keep a slight bend in your elbows the whole time.", "Squeeze your lower chest as your hands meet."] },
+          { name: "Cable Chest Fly - Straight/Mid", sets: 3, reps: "12-15", muscles: ["Mid Chest"], equipment: "Adjustable pulley station, set to chest height", restType: "isolation", maxKey: null, howto: ["Set both pulleys to chest height, straight across from your torso.", "Stand centered between the towers, step one foot forward.", "Pull both handles together directly in front of your chest.", "Keep a slight bend in your elbows throughout.", "Squeeze your chest at the center point."] },
         ]
       },
       {
-        name: "ARMS & SHOULDERS", color: "#f59e0b",
+        name: "SHOULDERS", color: "#10b981",
         exercises: [
-          { name: "Dumbbell Curl", sets: 3, reps: 12, muscles: ["Biceps"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand tall, dumbbells at sides, palms forward.", "Curl both up toward shoulders.", "Keep elbows pinned.", "Squeeze at top, lower slowly.", "No swinging."] },
-          { name: "Cable Tricep Pushdown", sets: 3, reps: 12, muscles: ["Triceps"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Elbows at sides, bent 90 degrees.", "Push straight down until extended.", "Split rope at bottom.", "Squeeze triceps.", "Elbows stay pinned."] },
-          { name: "Dumbbell Shoulder Press", sets: 3, reps: 12, muscles: ["Shoulders", "Triceps"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Sit with back support, dumbbells at shoulder height.", "Press straight up.", "Do not lock out.", "Lower to ear level.", "Core tight throughout."] },
+          { name: "Dumbbell Front Raise", sets: 3, reps: "12-15", muscles: ["Front Delts"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with dumbbells in front of your thighs, palms back.", "Raise dumbbells straight in front to shoulder height.", "Keep arms nearly straight.", "Lower slowly.", "Do not rock your body to swing the weight up."] },
+          { name: "Cable Lateral Raise", sets: 3, reps: "12-15", muscles: ["Side Delts"], equipment: "Adjustable pulley station, set low, single handle", restType: "isolation", maxKey: null, howto: ["Set the pulley to the lowest position.", "Stand beside the tower, hold the handle with your far hand.", "Raise your arm out to the side to shoulder height.", "Slight bend in the elbow.", "Lower slowly. Cable keeps tension at the bottom."] },
         ]
       },
       {
-        name: "LEGS (LIGHT)", color: "#84cc16",
+        name: "TRICEPS", color: "#ef4444",
         exercises: [
-          { name: "Leg Press - Light", sets: 2, reps: 15, muscles: ["Quads", "Glutes"], equipment: "Leg press machine, 60% of normal weight", restType: "isolation", maxKey: null, howto: ["Use 60% of your normal leg press weight.", "Feet shoulder width on the platform.", "Lower until knees hit 90 degrees.", "Press back up.", "Active recovery, keep it controlled."] },
-          { name: "Bodyweight Squat", sets: 2, reps: 20, muscles: ["Quads", "Glutes"], equipment: "Bodyweight", restType: "isolation", maxKey: null, howto: ["Feet shoulder width, toes slightly out.", "Hands out in front for balance.", "Squat until thighs are parallel.", "Drive through heels to stand.", "No weight, just flushing the legs."] },
+          { name: "Overhead Dumbbell Tricep Extension", sets: 3, reps: "12-15", muscles: ["Triceps"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Sit or stand, hold one dumbbell overhead with both hands.", "Lower behind your head by bending only your elbows.", "Keep elbows pointing forward and close to your head.", "Press back up to start.", "Targets the part of the tricep visible from behind."] },
+          { name: "Cable Kickback", sets: 3, reps: "12-15", muscles: ["Triceps"], equipment: "Adjustable pulley station, set low, single handle", restType: "isolation", maxKey: null, howto: ["Set the pulley to the lowest position, single handle attachment.", "Hinge forward, upper arm parallel to the floor.", "Extend your arm straight back until fully locked.", "Squeeze the tricep at full extension.", "Return slowly. Keep your upper arm still."] },
         ]
       }
     ]
   },
-  { id: 7, label: "Sun", title: "Rest", rest: true },
+  {
+    id: 5, label: "Fri", title: "Pull (Light)", stretchKey: "pull",
+    sections: [
+      {
+        name: "BACK", color: "#8b5cf6",
+        exercises: [
+          { name: "Dumbbell Bent-Over Row", sets: 3, reps: "12-15", muscles: ["Mid Back", "Lats", "Biceps"], equipment: "Dumbbells + Bench", restType: "isolation", maxKey: null, howto: ["Place one knee and hand on bench.", "Hold dumbbell in opposite hand, arm hanging.", "Pull dumbbell up toward your hip, elbow close.", "Squeeze your back at the top.", "Lower slowly. Back parallel to floor."] },
+          { name: "Cable Straight-Arm Pulldown", sets: 3, reps: "12-15", muscles: ["Lats", "Core"], equipment: "Adjustable pulley station, set high, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the highest position, attach the rope.", "Stand facing the tower, grip rope with straight arms.", "Hinge slightly at the hips.", "Pull the rope straight down to your thighs.", "Keep arms straight, feel your lats doing the work."] },
+          { name: "Seated Cable Row - Wide Grip", sets: 3, reps: "12-15", muscles: ["Upper Back", "Rear Shoulders"], equipment: "Adjustable pulley station, set low, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley low, attach the rope.", "Grip both ends, pull wide as you row.", "Pull the rope to your chest rather than your stomach.", "Squeeze upper back and rear shoulders.", "Hits upper back more than the standard close-grip row."] },
+          { name: "Cable Face Pull", sets: 3, reps: "15", muscles: ["Rear Delts", "Upper Back"], equipment: "Adjustable pulley station, set to face height, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to face height, attach the rope.", "Pull the rope toward your face, hands splitting apart.", "Elbows flare out at shoulder height.", "Squeeze rear delts and hold briefly.", "Protects your shoulders and improves posture."] },
+        ]
+      },
+      {
+        name: "BICEPS", color: "#f59e0b",
+        exercises: [
+          { name: "Dumbbell Curl", sets: 3, reps: "12-15", muscles: ["Biceps"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand tall, dumbbells at sides, palms forward.", "Curl both dumbbells up toward shoulders.", "Keep elbows pinned at your sides.", "Squeeze at the top, lower slowly.", "Do not swing your back to get the weight up."] },
+          { name: "Cable Curl", sets: 3, reps: "12-15", muscles: ["Biceps", "Forearms"], equipment: "Adjustable pulley station, set low, rope", restType: "isolation", maxKey: null, howto: ["Set the pulley to the lowest position, attach the rope.", "Stand close, grip rope ends with palms up.", "Curl the rope up to your chest.", "Keep elbows still and close to your body.", "The cable keeps tension at the bottom unlike dumbbells."] },
+        ]
+      }
+    ]
+  },
+  {
+    id: 6, label: "Sat", title: "Legs B · Hams & Glutes", stretchKey: "legsB",
+    note: "Warm up hips and hamstrings first: a bodyweight RDL pattern or a few air squats before you load any weight.",
+    coreFinisher: true,
+    sections: [
+      {
+        name: "HAMSTRINGS & GLUTES", color: "#84cc16",
+        exercises: [
+          { name: "Romanian Deadlift", sets: 4, reps: "6-8", muscles: ["Hamstrings", "Glutes", "Lower Back"], equipment: "Dumbbells or barbell", restType: "compound", maxKey: "rdl", howto: ["Stand with weight in front of your thighs.", "Hinge at the hips, pushing them back.", "Lower the weight along your legs until you feel a hamstring stretch.", "Drive hips forward to return to standing.", "Keep your back flat and knees soft throughout."] },
+          { name: "Dumbbell Hip Thrust", sets: 4, reps: "10-12", muscles: ["Glutes", "Hamstrings"], equipment: "Bench + Dumbbell", restType: "compound", maxKey: null, howto: ["Sit with upper back against a bench, feet flat, knees bent.", "Rest a dumbbell across your hips, hold it steady with both hands.", "Drive through your heels, push hips up until your body forms a straight line.", "Squeeze your glutes hard at the top.", "Lower with control, do not let your hips sag between reps."] },
+          { name: "Leg Curl", sets: 3, reps: "10-12", muscles: ["Hamstrings"], equipment: "Leg curl/extension machine, curl side", restType: "isolation", maxKey: null, howto: ["Sit or lie at the leg curl and extension machine, set to the curl position.", "Position the pad behind your ankles.", "Curl your legs toward your glutes.", "Squeeze your hamstrings at the top.", "Lower slowly, do not let the weight drop."] },
+          { name: "Dumbbell Sumo Squat", sets: 3, reps: "12-15", muscles: ["Glutes", "Inner Thighs", "Quads"], equipment: "Dumbbells", restType: "isolation", maxKey: null, howto: ["Stand with feet wider than shoulder width, toes pointed out.", "Hold one dumbbell with both hands between your legs.", "Squat straight down, keeping your chest tall.", "Drive through your heels to stand.", "Squeeze your glutes hard at the top."] },
+        ]
+      }
+    ]
+  },
+  { id: 7, label: "Sun", title: "Flex Day", flex: true },
+];
+
+const coreFinisherExercises = [
+  { name: "Weighted Plank", sets: 3, detail: "45-60 sec hold", muscles: ["Core", "Shoulders"], restType: "core", howto: ["Set up in a forearm plank, elbows under shoulders.", "Have someone place a light plate on your upper back, or skip the weight if none is available.", "Body in a straight line head to heels.", "Hold, breathing steady, don't let your hips sag or pike.", "This is your longest core hold of the week."] },
+  { name: "Weighted Leg Raises", sets: 3, detail: "12-15 reps", muscles: ["Lower Abs", "Hip Flexors"], restType: "core", howto: ["Lie flat, arms at your sides for stability.", "Hold a light dumbbell between your feet or ankles.", "Raise straight legs to 90 degrees.", "Lower slowly without letting your feet touch the floor.", "Drop the weight if your lower back starts arching off the floor."] },
+  { name: "Cable Woodchop", sets: 3, detail: "12 reps each side", muscles: ["Obliques", "Core"], restType: "core", howto: ["Set the pulley high, attach a single handle.", "Stand sideways to the tower, feet shoulder width.", "Pull the handle down and across your body in one motion, rotating through your torso.", "Control the return back up to the start.", "Finish all reps one side before switching."] },
+  { name: "Side Plank Reach-Unders", sets: 3, detail: "10 reps each side", muscles: ["Obliques", "Core"], restType: "core", howto: ["Set up in a side plank, forearm down, hips lifted.", "Reach your top arm up toward the ceiling.", "Rotate your torso down, threading your arm under your body.", "Return to the reaching position.", "Keep hips lifted the entire time, don't let them drop."] },
 ];
 
 const muscleColors = {
@@ -640,9 +638,23 @@ function DifficultySelector({ exerciseKey, difficulty, onChange }) {
   );
 }
 
-function WeightLogger({ exerciseKey, weights, maxKey, maxes, onChange }) {
+function WeightLogger({ exerciseKey, weights, maxKey, maxes, history, onChange, onLog }) {
   const d = weights[exerciseKey] || { weight: "", notes: "" };
+  const [localWeight, setLocalWeight] = useState(d.weight || "");
+  const [localNotes, setLocalNotes] = useState(d.notes || "");
+  const [saved, setSaved] = useState(false);
   const working = maxKey && maxes[maxKey] ? getWorkingWeight(maxes[maxKey].weight) : null;
+  const recent = (history || []).slice(-3).reverse();
+
+  function handleSave() {
+    if (!localWeight) return;
+    const entry = { weight: localWeight, notes: localNotes };
+    onChange(exerciseKey, entry);
+    onLog(exerciseKey, { date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), ...entry });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1800);
+  }
+
   return (
     <div style={{ marginTop: "12px", padding: "12px", background: "#0d1117", borderRadius: "8px", border: "1px solid #1f2937" }}>
       <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "2px", marginBottom: "8px" }}>WEIGHT LOG</div>
@@ -652,10 +664,23 @@ function WeightLogger({ exerciseKey, weights, maxKey, maxes, onChange }) {
           <span style={{ color: "#10b981", fontWeight: "800", fontSize: "14px" }}>{working} lbs</span>
         </div>
       )}
-      <input type="text" placeholder="Weight used (e.g. 135 lbs)" value={d.weight} onChange={e => onChange(exerciseKey, { ...d, weight: e.target.value })}
+      {recent.length > 0 && (
+        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px" }}>
+          {recent.map((r, i) => (
+            <div key={i} style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: "6px", padding: "4px 8px" }}>
+              <span style={{ color: "#4b5563", fontSize: "10px" }}>{r.date}</span>
+              <span style={{ color: "#9ca3af", fontSize: "11px", fontWeight: "700", marginLeft: "5px" }}>{r.weight}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <input type="text" placeholder="Weight used (e.g. 135 lbs)" value={localWeight} onChange={e => setLocalWeight(e.target.value)}
         style={{ width: "100%", background: "#111827", border: "1px solid #374151", borderRadius: "6px", padding: "8px 10px", color: "#f9fafb", fontSize: "13px", outline: "none", boxSizing: "border-box", marginBottom: "8px" }} />
-      <textarea placeholder="Notes (felt easy, increase next time, etc.)" value={d.notes} onChange={e => onChange(exerciseKey, { ...d, notes: e.target.value })} rows={2}
-        style={{ width: "100%", background: "#111827", border: "1px solid #374151", borderRadius: "6px", padding: "8px 10px", color: "#9ca3af", fontSize: "12px", outline: "none", resize: "none", boxSizing: "border-box" }} />
+      <textarea placeholder="Notes (felt easy, increase next time, etc.)" value={localNotes} onChange={e => setLocalNotes(e.target.value)} rows={2}
+        style={{ width: "100%", background: "#111827", border: "1px solid #374151", borderRadius: "6px", padding: "8px 10px", color: "#9ca3af", fontSize: "12px", outline: "none", resize: "none", boxSizing: "border-box", marginBottom: "8px" }} />
+      <button onClick={handleSave} style={{ width: "100%", background: saved ? "#10b981" : "#1f2937", color: saved ? "#030712" : "#9ca3af", border: "none", borderRadius: "6px", padding: "10px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>
+        {saved ? "Logged" : "Log this weight"}
+      </button>
     </div>
   );
 }
@@ -684,7 +709,7 @@ function SetsRepsEditor({ baseKey, exercise, customSetsReps, onChange }) {
   );
 }
 
-function ExerciseCard({ exercise, sectionColor, dayId, weights, maxes, difficulty, customSetsReps, onWeightChange, onDifficultyChange, onSetsRepsChange, checked, onToggleCheck }) {
+function ExerciseCard({ exercise, sectionColor, dayId, weights, maxes, difficulty, customSetsReps, exerciseHistory, onWeightChange, onLogHistory, onDifficultyChange, onSetsRepsChange, checked, onToggleCheck }) {
   const [open, setOpen] = useState(false);
   const baseKey = `d${dayId}_${exercise.name.replace(/\s+/g, "_")}`;
   const currentTier = difficulty[baseKey] || "intermediate";
@@ -736,16 +761,17 @@ function ExerciseCard({ exercise, sectionColor, dayId, weights, maxes, difficult
           ))}
           <SetsRepsEditor baseKey={baseKey} exercise={exercise} customSetsReps={customSetsReps} onChange={onSetsRepsChange} />
           <RestTimer restType={exercise.restType} />
-          <WeightLogger exerciseKey={exerciseKey} weights={weights} maxKey={exercise.maxKey} maxes={maxes} onChange={onWeightChange} />
+          <WeightLogger exerciseKey={exerciseKey} weights={weights} maxKey={exercise.maxKey} maxes={maxes} history={exerciseHistory[exerciseKey]} onChange={onWeightChange} onLog={onLogHistory} />
         </div>
       )}
     </div>
   );
 }
 
-function CoreCard({ exercise, dayId, weights, onWeightChange, checked, onToggleCheck }) {
+function CoreCard({ exercise, dayId, weights, exerciseHistory, onWeightChange, onLogHistory, checked, onToggleCheck, colorOverride, keyPrefix }) {
   const [open, setOpen] = useState(false);
-  const key = `d${dayId}_core_${exercise.name.replace(/\s+/g, "_")}`;
+  const accent = colorOverride || "#ec4899";
+  const key = `d${dayId}_${keyPrefix || "core"}_${exercise.name.replace(/\s+/g, "_")}`;
   return (
     <div style={{ background: "#111827", borderRadius: "12px", marginBottom: "10px", overflow: "hidden", border: `1px solid ${checked ? "#10b981aa" : "#1f2937"}` }}>
       <div style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: "10px" }}>
@@ -762,20 +788,20 @@ function CoreCard({ exercise, dayId, weights, onWeightChange, checked, onToggleC
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "5px" }}>{exercise.muscles.map(m => <MuscleTag key={m} muscle={m} />)}</div>
             <div style={{ color: "#6b7280", fontSize: "12px" }}>{exercise.sets} sets · {exercise.detail}</div>
           </div>
-          <div style={{ color: "#ec4899", fontSize: "20px", marginLeft: "12px", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>›</div>
+          <div style={{ color: accent, fontSize: "20px", marginLeft: "12px", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>›</div>
         </div>
       </div>
       {open && (
-        <div style={{ borderTop: "1px solid #ec489933", padding: "14px 16px", background: "#0a0f1a" }}>
-          <div style={{ color: "#ec4899", fontSize: "10px", letterSpacing: "3px", marginBottom: "10px" }}>HOW TO</div>
+        <div style={{ borderTop: `1px solid ${accent}33`, padding: "14px 16px", background: "#0a0f1a" }}>
+          <div style={{ color: accent, fontSize: "10px", letterSpacing: "3px", marginBottom: "10px" }}>HOW TO</div>
           {exercise.howto.map((step, i) => (
             <div key={i} style={{ display: "flex", gap: "10px", marginBottom: "8px" }}>
-              <div style={{ color: "#ec4899", fontSize: "12px", fontWeight: "800", minWidth: "18px" }}>{i + 1}.</div>
+              <div style={{ color: accent, fontSize: "12px", fontWeight: "800", minWidth: "18px" }}>{i + 1}.</div>
               <div style={{ color: "#d1d5db", fontSize: "13px", lineHeight: "1.5" }}>{step}</div>
             </div>
           ))}
           <RestTimer restType={exercise.restType} />
-          <WeightLogger exerciseKey={key} weights={weights} maxKey={null} maxes={{}} onChange={onWeightChange} />
+          <WeightLogger exerciseKey={key} weights={weights} maxKey={null} maxes={{}} history={exerciseHistory[key]} onChange={onWeightChange} onLog={onLogHistory} />
         </div>
       )}
     </div>
@@ -791,9 +817,9 @@ function StretchList({ items }) {
   ));
 }
 
-function StretchSection({ dayTitle }) {
+function StretchSection({ dayTitle, stretchKey }) {
   const [open, setOpen] = useState(false);
-  const targeted = stretchGroups[dayTitle] || [];
+  const targeted = stretchGroups[stretchKey] || [];
   const total = universalStretches.length + targeted.length;
   const minLow = Math.max(5, Math.round(total * 0.8));
   const minHigh = Math.round(total * 1.1);
@@ -824,7 +850,7 @@ function StretchSection({ dayTitle }) {
 }
 
 function CardioBanner({ zones, dayId, checked, onToggleCheck }) {
-  const isWeekend = dayId === 6;
+  const isWeekend = dayId === 6 || dayId === 7;
   const zone = isWeekend
     ? { label: "Cardio Zone", range: `${zones.cardioLow}-${zones.cardioHigh} bpm`, note: "Higher intensity today. You have the recovery time." }
     : { label: "Fat Burn Zone", range: `${zones.fatBurnLow}-${zones.fatBurnHigh} bpm`, note: "Keep it here on weeknights to protect sleep." };
@@ -1190,8 +1216,8 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
   );
 }
 
-function ResultsPage({ sessionLog }) {
-  const sessions = Object.values(sessionLog).sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+function ResultsPage({ sessionLog, onSetEffort }) {
+  const sessions = Object.entries(sessionLog).map(([key, s]) => ({ ...s, key })).sort((a, b) => a.dateKey.localeCompare(b.dateKey));
   const total = sessions.length;
 
   if (total === 0) {
@@ -1212,11 +1238,30 @@ function ResultsPage({ sessionLog }) {
 
   const recent = sessions.slice(-8).reverse();
   const maxCal = Math.max(...recent.map(s => s.calories || 0), 1);
+  const mostRecent = recent[0];
+  const effortOptions = [
+    { key: "easy", label: "Easy", color: "#10b981" },
+    { key: "moderate", label: "Moderate", color: "#f59e0b" },
+    { key: "hard", label: "Hard", color: "#ef4444" },
+  ];
 
   return (
     <div style={{ padding: "20px" }}>
       <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Results</div>
       <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Every completed workout, tracked</div>
+
+      {mostRecent && !mostRecent.effort && (
+        <div style={{ background: "#111827", borderRadius: "12px", padding: "14px 16px", border: "1px solid #1f2937", marginBottom: "16px" }}>
+          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "8px" }}>HOW DID {mostRecent.dayTitle.toUpperCase()} FEEL?</div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {effortOptions.map(o => (
+              <button key={o.key} onClick={() => onSetEffort(mostRecent.key, o.key)} style={{ flex: 1, background: "#0d1117", color: o.color, border: `1px solid ${o.color}55`, borderRadius: "8px", padding: "10px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "20px" }}>
         <div style={{ background: "#111827", borderRadius: "10px", padding: "14px", border: "1px solid #1f2937" }}>
@@ -1242,7 +1287,7 @@ function ResultsPage({ sessionLog }) {
         {recent.map((s, i) => (
           <div key={i} style={{ marginBottom: i < recent.length - 1 ? "12px" : "0" }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-              <div style={{ color: "#d1d5db", fontSize: "12px", fontWeight: "600" }}>{s.dayTitle} · {s.dateKey.slice(5)}</div>
+              <div style={{ color: "#d1d5db", fontSize: "12px", fontWeight: "600" }}>{s.dayTitle} · {s.dateKey.slice(5)}{s.effort && <span style={{ color: effortOptions.find(o => o.key === s.effort)?.color, marginLeft: "6px", fontSize: "10px" }}>· {s.effort}</span>}</div>
               <div style={{ color: "#6b7280", fontSize: "11px" }}>
                 {s.durationMin ? `${s.durationMin} min · ` : ""}{s.calories} cal
               </div>
@@ -1271,6 +1316,19 @@ function ProfilePage({ data, onUpdate }) {
     onUpdate({ ...data, profile });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  }
+
+  function handleExportData() {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `roberts-gym-data-${dateStamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   function handleLogWeight() {
@@ -1352,6 +1410,14 @@ function ProfilePage({ data, onUpdate }) {
           {saved ? "Saved" : "Save Profile"}
         </button>
       </div>
+
+      <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", border: "1px solid #1f2937" }}>
+        <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "8px" }}>YOUR DATA</div>
+        <div style={{ color: "#9ca3af", fontSize: "12px", lineHeight: "1.5", marginBottom: "12px" }}>Save a copy of everything, weights, maxes, sessions, nutrition, as a file you control. Independent of GitHub, the domain, or this device.</div>
+        <button onClick={handleExportData} style={{ width: "100%", background: "#1f2937", color: "#f9fafb", border: "1px solid #374151", borderRadius: "10px", padding: "12px", fontSize: "13px", fontWeight: "700", cursor: "pointer" }}>
+          Export my data
+        </button>
+      </div>
     </div>
   );
 }
@@ -1361,11 +1427,17 @@ function MaxTracker({ maxes, onSave }) {
   const [saved, setSaved] = useState(false);
 
   function handleSave() {
-    const now = new Date().toLocaleDateString("en-US", { month: "short", year: "numeric" });
-    const updated = {};
+    // Only stamp a fresh date/loggedAt on lifts you actually typed a new
+    // number into this time. Untouched lifts keep their real last-logged
+    // date, so the Sunday "max testing due" nudge stays accurate instead
+    // of resetting every time you hit Save.
+    const nowLabel = new Date().toLocaleDateString("en-US", { month: "short", year: "numeric" });
+    const nowIso = new Date().toISOString();
+    const updated = { ...maxes };
     compoundLifts.forEach(l => {
-      const val = editing[l.key] !== undefined ? editing[l.key] : (maxes[l.key]?.weight || "");
-      if (val) updated[l.key] = { weight: val, date: now };
+      if (editing[l.key] !== undefined && editing[l.key] !== "") {
+        updated[l.key] = { weight: editing[l.key], date: nowLabel, loggedAt: nowIso };
+      }
     });
     onSave(updated);
     setSaved(true);
@@ -1413,6 +1485,83 @@ function MaxTracker({ maxes, onSave }) {
   );
 }
 
+function isLiftStale(rec) {
+  if (!rec) return true;
+  if (!rec.loggedAt) return true; // logged before precise dates were tracked - treat as due
+  const elapsedDays = (new Date() - new Date(rec.loggedAt)) / 86400000;
+  return elapsedDays >= 28;
+}
+
+function FlexDayPage({ data, weights, exerciseHistory, onJumpToDay, onJumpToMaxes, onToggleFlexCheck, onWeightChange, onLogHistory, zones }) {
+  const [showAll, setShowAll] = useState(false);
+  const dateKey = getDateKey(new Date());
+  const weekKey = getWeekKey(new Date());
+  const liftDays = days.filter(d => !!d.sections);
+  const missedThisWeek = liftDays.filter(d => !!data.missed[`${weekKey}_d${d.id}`]);
+  const staleLifts = compoundLifts.filter(l => isLiftStale(data.maxes[l.key]));
+  const flexCardioDone = !!data.checks[`${dateKey}_flex_cardio`];
+
+  const panelStyle = { borderRadius: "12px", padding: "16px", marginBottom: "16px" };
+  const btnStyle = { display: "block", width: "100%", textAlign: "left", background: "#111827", color: "#f9fafb", border: "1px solid #1f2937", borderRadius: "10px", padding: "12px 14px", fontSize: "14px", fontWeight: "700", cursor: "pointer", marginTop: "8px" };
+
+  return (
+    <div style={{ padding: "20px" }}>
+      <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Flex Day</div>
+      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Rest, catch up on a missed day, or knock out max testing. Your call, nothing forced.</div>
+
+      {missedThisWeek.length > 0 ? (
+        <div style={{ ...panelStyle, background: "#1e3a5f33", border: "1px solid #38bdf855" }}>
+          <div style={{ color: "#38bdf8", fontSize: "10px", letterSpacing: "3px", marginBottom: "6px" }}>MAKEUP AVAILABLE</div>
+          <div style={{ color: "#f9fafb", fontSize: "14px", lineHeight: "1.5" }}>
+            {missedThisWeek.length === 1 ? `You missed ${missedThisWeek[0].title} this week.` : `You missed ${missedThisWeek.length} days this week.`} Today's a good day to catch up.
+          </div>
+          {missedThisWeek.map(d => (
+            <button key={d.id} onClick={() => onJumpToDay(d.id)} style={btnStyle}>Do {d.title} →</button>
+          ))}
+        </div>
+      ) : staleLifts.length > 0 ? (
+        <div style={{ ...panelStyle, background: "#78350f22", border: "1px solid #f59e0b55" }}>
+          <div style={{ color: "#f59e0b", fontSize: "10px", letterSpacing: "3px", marginBottom: "6px" }}>MAX TESTING DUE</div>
+          <div style={{ color: "#f9fafb", fontSize: "14px", lineHeight: "1.5" }}>
+            {staleLifts.map(l => l.name).join(", ")} {staleLifts.length === 1 ? "hasn't" : "haven't"} been logged in about 4 weeks. A free day like today is a good time to retest.
+          </div>
+          <button onClick={onJumpToMaxes} style={btnStyle}>Go log 5RMs →</button>
+        </div>
+      ) : (
+        <div style={{ ...panelStyle, background: "#0f172a", border: "1px solid #1e3a5f" }}>
+          <div style={{ color: "#38bdf8", fontSize: "10px", letterSpacing: "3px", marginBottom: "6px" }}>NOTHING DUE</div>
+          <div style={{ color: "#f9fafb", fontSize: "14px", lineHeight: "1.5", marginBottom: "4px" }}>Nothing missed, no maxes overdue. True rest is fine today. If you want to move, here's a light optional session.</div>
+        </div>
+      )}
+
+      {missedThisWeek.length === 0 && staleLifts.length === 0 && (
+        <div style={{ marginBottom: "24px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
+            <div style={{ width: "3px", height: "18px", background: "#38bdf8", borderRadius: "2px" }} />
+            <div style={{ color: "#38bdf8", fontSize: "11px", letterSpacing: "3px", fontWeight: "700" }}>OPTIONAL · LIGHT CORE</div>
+          </div>
+          {coreExercisesRegular.map(ex => {
+            const key = `${dateKey}_flex_core_${ex.name.replace(/\s+/g, "_")}`;
+            return <CoreCard key={ex.name} exercise={ex} dayId={7} keyPrefix="flexcore" colorOverride="#38bdf8" weights={weights} exerciseHistory={exerciseHistory} onWeightChange={onWeightChange} onLogHistory={onLogHistory} checked={!!data.checks[key]} onToggleCheck={() => onToggleFlexCheck("core", ex.name)} />;
+          })}
+          <CardioBanner zones={zones} dayId={7} checked={flexCardioDone} onToggleCheck={() => onToggleFlexCheck("cardio", null)} />
+        </div>
+      )}
+
+      <button onClick={() => setShowAll(s => !s)} style={{ background: "none", border: "none", color: "#6b7280", fontSize: "12px", textDecoration: "underline", textDecorationStyle: "dotted", cursor: "pointer", padding: "8px 0" }}>
+        {showAll ? "Hide day list" : "Or pick a different day"}
+      </button>
+      {showAll && (
+        <div style={{ marginTop: "4px" }}>
+          {liftDays.map(d => (
+            <button key={d.id} onClick={() => onJumpToDay(d.id)} style={btnStyle}>{d.title}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================================
 // MAIN APP
 // ============================================================================
@@ -1429,6 +1578,11 @@ function GymPlanInner() {
     setData(updated);
     saveData(updated);
   }
+
+  // Persist once on mount so a freshly-defaulted programStartDate (used for
+  // the deload-week cadence) actually gets written to storage even if
+  // nothing else changes this session.
+  useEffect(() => { saveData(data); }, []);
 
   const [toasts, setToasts] = useState([]);
   function pushToast(title, subtitle, color) {
@@ -1464,7 +1618,16 @@ function GymPlanInner() {
   }
 
   function handleWeightChange(key, value) { update({ weights: { ...data.weights, [key]: value } }); }
+  function handleLogHistory(key, entry) {
+    const existing = data.exerciseHistory[key] || [];
+    update({ exerciseHistory: { ...data.exerciseHistory, [key]: [...existing, entry].slice(-12) } });
+  }
   function handleMaxSave(maxes) { update({ maxes }); }
+  function handleSetEffort(sessionKey, effort) {
+    const existing = data.sessionLog[sessionKey];
+    if (!existing) return;
+    update({ sessionLog: { ...data.sessionLog, [sessionKey]: { ...existing, effort } } });
+  }
   function handleDifficultyChange(key, value) { update({ difficulty: { ...data.difficulty, [key]: value } }); }
   function handleMissedToggle(key) {
     const updated = { ...data.missed };
@@ -1485,9 +1648,37 @@ function GymPlanInner() {
     update({ activeSession: { dateKey, dayId, start: new Date().toISOString() } });
   }
 
+  function handleJumpToDay(dayId) {
+    const idx = days.findIndex(d => d.id === dayId);
+    if (idx >= 0) setSelectedDay(idx);
+    setPage("workout");
+  }
+
+  function handleFlexCheckToggle(kind, name) {
+    const dateKey = getDateKey(new Date());
+    const key = kind === "cardio" ? `${dateKey}_flex_cardio` : `${dateKey}_flex_core_${name.replace(/\s+/g, "_")}`;
+    const updated = { ...data.checks };
+    const wasChecked = !!updated[key];
+    if (wasChecked) delete updated[key]; else updated[key] = true;
+    update({ checks: updated });
+
+    if (!wasChecked) {
+      const requiredKeys = [
+        ...coreExercisesRegular.map(e => `${dateKey}_flex_core_${e.name.replace(/\s+/g, "_")}`),
+        `${dateKey}_flex_cardio`,
+      ];
+      const allChecked = requiredKeys.every(k => updated[k]);
+      if (allChecked) {
+        pushToast("Flex day complete!", "Nice work keeping the streak going.", "#38bdf8");
+        applyXpAwards([{ reasonKey: `xp_flex_${dateKey}`, amount: 15, label: "Flex day session", color: "#38bdf8" }]);
+      }
+    }
+  }
+
   function buildCheckKey(dateKey, dayId, kind, name) {
     if (kind === "cardio") return `${dateKey}_d${dayId}_cardio`;
     if (kind === "core") return `${dateKey}_d${dayId}_core_${name.replace(/\s+/g, "_")}`;
+    if (kind === "corefinisher") return `${dateKey}_d${dayId}_corefinisher_${name.replace(/\s+/g, "_")}`;
     return `${dateKey}_d${dayId}_${name.replace(/\s+/g, "_")}`;
   }
 
@@ -1512,10 +1703,12 @@ function GymPlanInner() {
         const coreSkipped = !!data.coreSkip[`${dateKey}_d${dayId}`];
         const coreModeVal = data.coreMode[`${dateKey}_d${dayId}`] || "regular";
         const coreNames = coreSkipped ? [] : (coreModeVal === "full" ? coreExercisesFull : coreExercisesRegular).map(e => e.name);
+        const finisherNames = dayDef.coreFinisher ? coreFinisherExercises.map(e => e.name) : [];
 
         const requiredKeys = [
           ...liftNames.map(n => buildCheckKey(dateKey, dayId, "lift", n)),
           ...coreNames.map(n => buildCheckKey(dateKey, dayId, "core", n)),
+          ...finisherNames.map(n => buildCheckKey(dateKey, dayId, "corefinisher", n)),
           buildCheckKey(dateKey, dayId, "cardio", null),
         ];
         const allChecked = requiredKeys.every(k => updated[k]);
@@ -1594,6 +1787,11 @@ function GymPlanInner() {
   const day = days[selectedDay];
   const zones = getHRZones(data.profile.age);
 
+  const weekKeyNow = getWeekKey(new Date());
+  const weeksSinceStart = Math.floor((new Date() - new Date(data.programStartDate)) / (7 * 24 * 60 * 60 * 1000));
+  const deloadDue = weeksSinceStart > 0 && weeksSinceStart % 6 === 0 && data.deloadAckWeek !== weekKeyNow;
+  function handleAckDeload() { update({ deloadAckWeek: weekKeyNow }); }
+
   const navItems = [
     { key: "nutrition", label: "Nutrition" },
     { key: "workout", label: "Workout" },
@@ -1645,6 +1843,14 @@ function GymPlanInner() {
         )}
       </div>
 
+      {page === "workout" && deloadDue && (
+        <div style={{ margin: "16px 20px 0", background: "#78350f22", border: "1px solid #f59e0b55", borderRadius: "12px", padding: "14px 16px" }}>
+          <div style={{ color: "#f59e0b", fontSize: "10px", letterSpacing: "3px", marginBottom: "6px" }}>DELOAD WEEK SUGGESTED</div>
+          <div style={{ color: "#f9fafb", fontSize: "13px", lineHeight: "1.5", marginBottom: "10px" }}>About 6 weeks of training since your last reset. Drop weight roughly 15%, keep the same reps, let your joints catch up. Normal weight comes back next week.</div>
+          <button onClick={handleAckDeload} style={{ background: "#f59e0b", color: "#030712", border: "none", borderRadius: "8px", padding: "8px 14px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>Got it</button>
+        </div>
+      )}
+
       {page === "profile" ? (
         <ProfilePage data={data} onUpdate={update} />
       ) : page === "maxes" ? (
@@ -1652,13 +1858,9 @@ function GymPlanInner() {
       ) : page === "nutrition" ? (
         <NutritionPage nutritionLog={data.nutritionLog} latestWeight={data.weightLog[data.weightLog.length - 1]?.weight} onAddEntry={handleAddNutritionEntry} onDeleteEntry={handleDeleteNutritionEntry} />
       ) : page === "results" ? (
-        <ResultsPage sessionLog={data.sessionLog} />
-      ) : day.rest ? (
-        <div style={{ textAlign: "center", padding: "60px 20px" }}>
-          <div style={{ fontSize: "48px", marginBottom: "16px" }}>🛌</div>
-          <div style={{ color: "#f9fafb", fontSize: "22px", fontWeight: "800", marginBottom: "8px" }}>Rest Day</div>
-          <div style={{ color: "#6b7280", fontSize: "14px", lineHeight: "1.6" }}>Stretch, walk, or do your home cool-down.<br />Recovery is part of the work.</div>
-        </div>
+        <ResultsPage sessionLog={data.sessionLog} onSetEffort={handleSetEffort} />
+      ) : day.flex ? (
+        <FlexDayPage data={data} weights={data.weights} exerciseHistory={data.exerciseHistory} onJumpToDay={handleJumpToDay} onJumpToMaxes={() => setPage("maxes")} onToggleFlexCheck={handleFlexCheckToggle} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} zones={zones} />
       ) : (
         <div style={{ padding: "20px" }}>
           <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>{day.title}</div>
@@ -1667,7 +1869,7 @@ function GymPlanInner() {
 
           <MissedDayButton dayId={day.id} missed={data.missed} onToggle={handleMissedToggle} />
           <StartWorkoutBanner dayId={day.id} activeSession={data.activeSession} onStart={() => handleStartWorkout(day.id)} />
-          <StretchSection dayTitle={day.title} />
+          <StretchSection dayTitle={day.title} stretchKey={day.stretchKey} />
 
           {day.sections.map(section => (
             <div key={section.name} style={{ marginBottom: "24px" }}>
@@ -1678,7 +1880,7 @@ function GymPlanInner() {
               {section.exercises.map(ex => {
                 const checkKey = `${dateKey}_d${day.id}_${ex.name.replace(/\s+/g, "_")}`;
                 return (
-                  <ExerciseCard key={ex.name} exercise={ex} sectionColor={section.color} dayId={day.id} weights={data.weights} maxes={data.maxes} difficulty={data.difficulty} customSetsReps={data.customSetsReps} onWeightChange={handleWeightChange} onDifficultyChange={handleDifficultyChange} onSetsRepsChange={handleSetsRepsChange} checked={!!data.checks[checkKey]} onToggleCheck={() => handleCheckToggle(day.id, ex.name, day.title, "lift")} />
+                  <ExerciseCard key={ex.name} exercise={ex} sectionColor={section.color} dayId={day.id} weights={data.weights} maxes={data.maxes} difficulty={data.difficulty} customSetsReps={data.customSetsReps} exerciseHistory={data.exerciseHistory} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} onDifficultyChange={handleDifficultyChange} onSetsRepsChange={handleSetsRepsChange} checked={!!data.checks[checkKey]} onToggleCheck={() => handleCheckToggle(day.id, ex.name, day.title, "lift")} />
                 );
               })}
             </div>
@@ -1701,10 +1903,24 @@ function GymPlanInner() {
               ((data.coreMode[`${dateKey}_d${day.id}`] || "regular") === "full" ? coreExercisesFull : coreExercisesRegular)
                 .map(ex => {
                   const coreCheckKey = `${dateKey}_d${day.id}_core_${ex.name.replace(/\s+/g, "_")}`;
-                  return <CoreCard key={ex.name} exercise={ex} dayId={day.id} weights={data.weights} onWeightChange={handleWeightChange} checked={!!data.checks[coreCheckKey]} onToggleCheck={() => handleCheckToggle(day.id, ex.name, day.title, "core")} />;
+                  return <CoreCard key={ex.name} exercise={ex} dayId={day.id} weights={data.weights} exerciseHistory={data.exerciseHistory} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} checked={!!data.checks[coreCheckKey]} onToggleCheck={() => handleCheckToggle(day.id, ex.name, day.title, "core")} />;
                 })
             )}
           </div>
+
+          {day.coreFinisher && (
+            <div style={{ marginBottom: "24px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+                <div style={{ width: "3px", height: "18px", background: "#f97316", borderRadius: "2px" }} />
+                <div style={{ color: "#f97316", fontSize: "11px", letterSpacing: "3px", fontWeight: "700" }}>CORE FINISHER</div>
+              </div>
+              <div style={{ color: "#6b7280", fontSize: "12px", marginBottom: "12px" }}>Your bigger core session for the week, on top of the regular block above.</div>
+              {coreFinisherExercises.map(ex => {
+                const finisherCheckKey = `${dateKey}_d${day.id}_corefinisher_${ex.name.replace(/\s+/g, "_")}`;
+                return <CoreCard key={ex.name} exercise={ex} dayId={day.id} keyPrefix="corefinisher" colorOverride="#f97316" weights={data.weights} exerciseHistory={data.exerciseHistory} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} checked={!!data.checks[finisherCheckKey]} onToggleCheck={() => handleCheckToggle(day.id, ex.name, day.title, "corefinisher")} />;
+              })}
+            </div>
+          )}
 
           <CardioBanner zones={zones} dayId={day.id} checked={!!data.checks[`${dateKey}_d${day.id}_cardio`]} onToggleCheck={() => handleCheckToggle(day.id, null, day.title, "cardio")} />
 
