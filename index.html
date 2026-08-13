@@ -17,12 +17,30 @@
 <body>
 <div id="root"></div>
 <script type="text/babel" data-presets="react" data-type="module">
-const { useState, useEffect, Component } = React;
+const { useState, useEffect, useRef, Component } = React;
 
 // ============================================================================
 // ROBERT'S GYM PLAN
 // ----------------------------------------------------------------------------
 // CHANGELOG
+//
+// v17
+//   - Manual cardio/activity logging. New "Log Activity" card on the
+//     Results tab: pick Walk/Run/Bike/Hike/Other, enter minutes, get an
+//     estimate using a per-activity MET value (not the flat lifting
+//     number), and it feeds into your Results totals and recent-sessions
+//     list alongside lift days. Delete button on activity entries only.
+//   - Rest timer is now cancelable. Tapping it while running stops AND
+//     resets it instead of forcing you to wait it out after an accidental
+//     tap.
+//   - Nutrition tab can browse previous days. Left/right arrows move a day
+//     at a time, "Jump to today" snaps back. Data was always saved per day,
+//     this just makes it visible - you can also add or delete entries on a
+//     past day if you forgot to log something.
+//   - Weight log entries (Progress tab) can now be edited or deleted
+//     individually. Fixes the root cause of the chart/Rate-of-Loss
+//     jumbling: corrections used to always append a new point instead of
+//     fixing the existing one.
 //
 // v16  (Nutrition tab only - no other systems touched)
 //   - Carbs added to the Nutrition tab: target bar plus a Carbs(g) input.
@@ -161,7 +179,7 @@ const { useState, useEffect, Component } = React;
 // DATA LAYER
 // ============================================================================
 
-const APP_VERSION = "v16";
+const APP_VERSION = "v17";
 
 // Storage key is intentionally NOT tied to APP_VERSION.
 // Bumping the version must never wipe the weight log, 5RMs, or logged weights.
@@ -206,7 +224,7 @@ function loadData() {
     weights: {}, maxes: {}, missed: {}, difficulty: {}, coreSkip: {}, quickCoreLog: {},
     checks: {}, nutritionLog: {}, xp: 0, xpLog: {}, coreMode: {}, customSetsReps: {},
     exerciseHistory: {}, deloadAckWeek: null, programStartDate: new Date().toISOString(),
-    activeSession: null, sessionLog: {},
+    activeSession: null, sessionLog: {}, activityLog: [],
     profile: { age: 31, goalWeight: 180 },
     weightLog: [{ date: "Jul 2025", weight: 206.6 }],
   };
@@ -307,10 +325,22 @@ function getLevelInfo(xp) {
   return { level, into, needed: perLevel, pct: Math.round((into / perLevel) * 100) };
 }
 
-function estimateCaloriesBurned(weightLbs, durationHours) {
+// MET values for standalone cardio logging. Lifting keeps its own fixed
+// 4.5 MET below - these are only used by the manual Activity Logger, since
+// a 60-min walk and a 20-min run burn very differently and a flat number
+// would be wrong most of the time.
+const CARDIO_TYPES = [
+  { key: "walk", label: "Walk", met: 3.8 },
+  { key: "run", label: "Run", met: 9.0 },
+  { key: "bike", label: "Bike", met: 7.0 },
+  { key: "hike", label: "Hike", met: 6.0 },
+  { key: "other", label: "Other", met: 5.0 },
+];
+
+function estimateCaloriesBurned(weightLbs, durationHours, met) {
   const w = parseFloat(weightLbs) || 200;
   const kg = w / 2.205;
-  const MET = 4.5;
+  const MET = met || 4.5;
   const hours = durationHours || 0.83; // fallback: ~50 min average session when no real timer was used
   return Math.round((MET * kg * hours) / 10) * 10;
 }
@@ -671,18 +701,33 @@ function MuscleTag({ muscle }) {
 
 function RestTimer({ restType }) {
   const [running, setRunning] = useState(false);
-  const [seconds, setSeconds] = useState(restPeriods[restType]?.seconds || 60);
   const fullSeconds = restPeriods[restType]?.seconds || 60;
+  const [seconds, setSeconds] = useState(fullSeconds);
+  const intervalRef = useRef(null);
 
-  function start() {
+  // Clear any running interval if this card collapses/unmounts mid-timer,
+  // so a stray timer doesn't keep ticking in the background.
+  useEffect(() => () => clearInterval(intervalRef.current), []);
+
+  function start(e) {
+    e.stopPropagation();
     setSeconds(fullSeconds);
     setRunning(true);
-    const interval = setInterval(() => {
+    intervalRef.current = setInterval(() => {
       setSeconds(s => {
-        if (s <= 1) { clearInterval(interval); setRunning(false); return 0; }
+        if (s <= 1) { clearInterval(intervalRef.current); setRunning(false); return 0; }
         return s - 1;
       });
     }, 1000);
+  }
+
+  // Tapping while running cancels AND resets, so an accidental tap doesn't
+  // trap you waiting it out, and it's immediately ready to start again.
+  function cancel(e) {
+    e.stopPropagation();
+    clearInterval(intervalRef.current);
+    setRunning(false);
+    setSeconds(fullSeconds);
   }
 
   const mins = Math.floor(seconds / 60);
@@ -693,9 +738,9 @@ function RestTimer({ restType }) {
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#0d1117", borderRadius: "8px", padding: "10px 12px", marginTop: "10px", border: "1px solid #1f2937" }}>
       <div>
         <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "1px" }}>REST BETWEEN SETS</div>
-        <div style={{ color: "#9ca3af", fontSize: "13px", fontWeight: "600" }}>{label}</div>
+        <div style={{ color: "#9ca3af", fontSize: "13px", fontWeight: "600" }}>{running ? "Tap to cancel" : label}</div>
       </div>
-      <button onClick={start} disabled={running} style={{ background: running ? "#374151" : "#38bdf8", color: running ? "#9ca3af" : "#030712", border: "none", borderRadius: "8px", padding: "8px 14px", fontSize: "14px", fontWeight: "800", cursor: running ? "default" : "pointer", minWidth: "70px" }}>
+      <button onClick={running ? cancel : start} style={{ background: running ? "#ef444422" : "#38bdf8", color: running ? "#ef4444" : "#030712", border: running ? "1px solid #ef444455" : "none", borderRadius: "8px", padding: "8px 14px", fontSize: "14px", fontWeight: "800", cursor: "pointer", minWidth: "70px" }}>
         {running ? `${mins}:${secs.toString().padStart(2, "0")}` : "Start"}
       </button>
     </div>
@@ -1463,9 +1508,17 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
   const [fiber, setFiber] = useState("");
   const [sodium, setSodium] = useState("");
   const [water, setWater] = useState("");
+  // 0 = today, -1 = yesterday, etc. Entries save/load correctly per day
+  // under the hood already, this just gives you a way to look back.
+  const [dayOffset, setDayOffset] = useState(0);
 
-  const dateKey = getDateKey(new Date());
-  const isRestDay = new Date().getDay() === 0;
+  const viewDate = new Date();
+  viewDate.setDate(viewDate.getDate() + dayOffset);
+  const dateKey = getDateKey(viewDate);
+  const isRestDay = viewDate.getDay() === 0;
+  const isToday = dayOffset === 0;
+  const dayLabel = isToday ? "Today" : dayOffset === -1 ? "Yesterday" : viewDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
   const targets = getDietTargets(latestWeight || 200, isRestDay);
   const entries = nutritionLog[dateKey] || [];
 
@@ -1499,8 +1552,20 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
     <div style={{ padding: "20px" }}>
       <DailyTotalsStrip totals={totals} targets={targets} />
 
-      <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Nutrition</div>
-      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>
+      <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "10px" }}>Nutrition</div>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "16px", marginBottom: isToday ? "8px" : "2px" }}>
+        <div onClick={() => setDayOffset(o => o - 1)} style={{ color: "#38bdf8", fontSize: "22px", cursor: "pointer", padding: "2px 12px", lineHeight: 1 }}>‹</div>
+        <div style={{ color: "#f9fafb", fontSize: "14px", fontWeight: "700", minWidth: "110px", textAlign: "center" }}>{dayLabel}</div>
+        <div onClick={() => !isToday && setDayOffset(o => o + 1)} style={{ color: isToday ? "#374151" : "#38bdf8", fontSize: "22px", cursor: isToday ? "default" : "pointer", padding: "2px 12px", lineHeight: 1 }}>›</div>
+      </div>
+      {!isToday && (
+        <div onClick={() => setDayOffset(0)} style={{ textAlign: "center", color: "#4b5563", fontSize: "11px", textDecoration: "underline", textDecorationStyle: "dotted", cursor: "pointer", marginBottom: "8px" }}>
+          Jump to today
+        </div>
+      )}
+
+      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px", textAlign: "center" }}>
         {isRestDay ? "Rest day targets" : "Training day targets"} · based on {latestWeight} lbs
       </div>
 
@@ -1539,9 +1604,9 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
         </button>
       </div>
 
-      {entries.length > 0 && (
+      {entries.length > 0 ? (
         <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", border: "1px solid #1f2937" }}>
-          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "10px" }}>TODAY'S ENTRIES</div>
+          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "10px" }}>{isToday ? "TODAY'S ENTRIES" : `${dayLabel.toUpperCase()}'S ENTRIES`}</div>
           {entries.map((e, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < entries.length - 1 ? "1px solid #1f2937" : "none" }}>
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -1559,20 +1624,70 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
             </div>
           ))}
         </div>
-      )}
+      ) : !isToday ? (
+        <div style={{ color: "#4b5563", fontSize: "12px", textAlign: "center", padding: "20px 0" }}>Nothing logged {dayLabel}.</div>
+      ) : null}
     </div>
   );
 }
 
-function ResultsPage({ sessionLog, onSetEffort }) {
-  const sessions = Object.entries(sessionLog).map(([key, s]) => ({ ...s, key })).sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+// Standalone cardio, walks/runs/anything not tied to a lift day. Duration
+// times the activity's MET value drives the calorie estimate, since a
+// 60-min walk and a 20-min run burn very differently.
+function ActivityLogger({ weight, onLog }) {
+  const [type, setType] = useState("walk");
+  const [duration, setDuration] = useState("");
+
+  function handleLog() {
+    const mins = parseFloat(duration);
+    if (!mins) return;
+    const activity = CARDIO_TYPES.find(c => c.key === type) || CARDIO_TYPES[0];
+    const calories = estimateCaloriesBurned(weight, mins / 60, activity.met);
+    onLog({
+      dateKey: getDateKey(new Date()),
+      type: activity.key,
+      typeLabel: activity.label,
+      durationMin: mins,
+      calories,
+      loggedAt: new Date().toISOString(),
+    });
+    setDuration("");
+  }
+
+  return (
+    <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "20px", border: "1px solid #1f2937" }}>
+      <div style={{ color: "#38bdf8", fontSize: "10px", letterSpacing: "3px", marginBottom: "12px" }}>LOG ACTIVITY</div>
+      <div style={{ display: "flex", gap: "6px", marginBottom: "10px", flexWrap: "wrap" }}>
+        {CARDIO_TYPES.map(c => (
+          <button key={c.key} onClick={() => setType(c.key)} style={{
+            flex: "1 1 auto", minWidth: "60px", background: type === c.key ? "#38bdf8" : "#0d1117",
+            color: type === c.key ? "#030712" : "#9ca3af", border: "1px solid " + (type === c.key ? "#38bdf8" : "#1f2937"),
+            borderRadius: "8px", padding: "8px 10px", fontSize: "12px", fontWeight: "700", cursor: "pointer",
+          }}>{c.label}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: "8px" }}>
+        <input type="number" inputMode="decimal" placeholder="Duration (min)" value={duration} onChange={e => setDuration(e.target.value)}
+          style={{ flex: 1, background: "#0d1117", border: "1px solid #374151", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "14px", outline: "none" }} />
+        <button onClick={handleLog} style={{ background: "#38bdf822", color: "#38bdf8", border: "1px solid #38bdf855", borderRadius: "8px", padding: "10px 16px", fontSize: "13px", fontWeight: "800", cursor: "pointer" }}>Log</button>
+      </div>
+      <div style={{ color: "#6b7280", fontSize: "11px", marginTop: "8px" }}>Estimate uses your logged bodyweight. Feeds into your totals below.</div>
+    </div>
+  );
+}
+
+function ResultsPage({ sessionLog, activityLog, weight, onSetEffort, onLogActivity, onDeleteActivity }) {
+  const liftSessions = Object.entries(sessionLog).map(([key, s]) => ({ ...s, key, kind: "lift" }));
+  const cardioSessions = (activityLog || []).map((a, i) => ({ ...a, key: `activity_${i}`, activityIndex: i, kind: "cardio" }));
+  const sessions = [...liftSessions, ...cardioSessions].sort((a, b) => a.dateKey.localeCompare(b.dateKey));
   const total = sessions.length;
 
   if (total === 0) {
     return (
       <div style={{ padding: "20px" }}>
         <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "8px" }}>Results</div>
-        <div style={{ color: "#6b7280", fontSize: "13px" }}>Finish a full workout (all exercises checked) to start building your stats here.</div>
+        <ActivityLogger weight={weight} onLog={onLogActivity} />
+        <div style={{ color: "#6b7280", fontSize: "13px" }}>Finish a full workout (all exercises checked), or log an activity above, to start building your stats here.</div>
       </div>
     );
   }
@@ -1586,7 +1701,7 @@ function ResultsPage({ sessionLog, onSetEffort }) {
 
   const recent = sessions.slice(-8).reverse();
   const maxCal = Math.max(...recent.map(s => s.calories || 0), 1);
-  const mostRecent = recent[0];
+  const mostRecentLift = liftSessions.sort((a, b) => a.dateKey.localeCompare(b.dateKey)).slice(-1)[0];
   const effortOptions = [
     { key: "easy", label: "Easy", color: "#10b981" },
     { key: "moderate", label: "Moderate", color: "#f59e0b" },
@@ -1596,20 +1711,22 @@ function ResultsPage({ sessionLog, onSetEffort }) {
   return (
     <div style={{ padding: "20px" }}>
       <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Results</div>
-      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Every completed workout, tracked</div>
+      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Every completed workout and logged activity, tracked</div>
 
-      {mostRecent && !mostRecent.effort && (
+      {mostRecentLift && !mostRecentLift.effort && (
         <div style={{ background: "#111827", borderRadius: "12px", padding: "14px 16px", border: "1px solid #1f2937", marginBottom: "16px" }}>
-          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "8px" }}>HOW DID {mostRecent.dayTitle.toUpperCase()} FEEL?</div>
+          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "8px" }}>HOW DID {mostRecentLift.dayTitle.toUpperCase()} FEEL?</div>
           <div style={{ display: "flex", gap: "8px" }}>
             {effortOptions.map(o => (
-              <button key={o.key} onClick={() => onSetEffort(mostRecent.key, o.key)} style={{ flex: 1, background: "#0d1117", color: o.color, border: `1px solid ${o.color}55`, borderRadius: "8px", padding: "10px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>
+              <button key={o.key} onClick={() => onSetEffort(mostRecentLift.key, o.key)} style={{ flex: 1, background: "#0d1117", color: o.color, border: `1px solid ${o.color}55`, borderRadius: "8px", padding: "10px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>
                 {o.label}
               </button>
             ))}
           </div>
         </div>
       )}
+
+      <ActivityLogger weight={weight} onLog={onLogActivity} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "20px" }}>
         <div style={{ background: "#111827", borderRadius: "10px", padding: "14px", border: "1px solid #1f2937" }}>
@@ -1635,17 +1752,71 @@ function ResultsPage({ sessionLog, onSetEffort }) {
         {recent.map((s, i) => (
           <div key={i} style={{ marginBottom: i < recent.length - 1 ? "12px" : "0" }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-              <div style={{ color: "#d1d5db", fontSize: "12px", fontWeight: "600" }}>{s.dayTitle} · {s.dateKey.slice(5)}{s.effort && <span style={{ color: effortOptions.find(o => o.key === s.effort)?.color, marginLeft: "6px", fontSize: "10px" }}>· {s.effort}</span>}</div>
-              <div style={{ color: "#6b7280", fontSize: "11px" }}>
-                {s.durationMin ? `${s.durationMin} min · ` : ""}{s.calories} cal
+              <div style={{ color: "#d1d5db", fontSize: "12px", fontWeight: "600" }}>
+                {s.kind === "cardio" ? `🏃 ${s.typeLabel}` : s.dayTitle} · {s.dateKey.slice(5)}
+                {s.effort && <span style={{ color: effortOptions.find(o => o.key === s.effort)?.color, marginLeft: "6px", fontSize: "10px" }}>· {s.effort}</span>}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <div style={{ color: "#6b7280", fontSize: "11px" }}>
+                  {s.durationMin ? `${s.durationMin} min · ` : ""}{s.calories} cal
+                </div>
+                {s.kind === "cardio" && (
+                  <div onClick={() => onDeleteActivity(s.activityIndex)} style={{ color: "#ef4444", fontSize: "16px", cursor: "pointer" }}>×</div>
+                )}
               </div>
             </div>
             <div style={{ background: "#0d1117", borderRadius: "999px", height: "6px", overflow: "hidden" }}>
-              <div style={{ background: "#10b981", height: "100%", width: `${((s.calories || 0) / maxCal) * 100}%`, borderRadius: "999px" }} />
+              <div style={{ background: s.kind === "cardio" ? "#38bdf8" : "#10b981", height: "100%", width: `${((s.calories || 0) / maxCal) * 100}%`, borderRadius: "999px" }} />
             </div>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Per-entry edit/delete so a bad weigh-in can be corrected in place instead
+// of permanently sitting in the array and skewing the chart and the Rate of
+// Loss card (which reads the last 3 raw entries, not last 3 distinct days).
+function WeightHistoryList({ log, onEdit, onDelete }) {
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [editValue, setEditValue] = useState("");
+
+  if (!log || log.length === 0) return null;
+  const reversed = log.map((e, i) => ({ ...e, index: i })).slice().reverse();
+
+  function startEdit(entry) {
+    setEditingIndex(entry.index);
+    setEditValue(String(entry.weight));
+  }
+  function saveEdit(index) {
+    onEdit(index, editValue);
+    setEditingIndex(null);
+  }
+
+  return (
+    <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "20px", border: "1px solid #1f2937" }}>
+      <div style={{ color: "#38bdf8", fontSize: "10px", letterSpacing: "3px", marginBottom: "12px" }}>RECENT WEIGH-INS</div>
+      {reversed.slice(0, 10).map(e => (
+        <div key={e.index} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #1f2937" }}>
+          <div style={{ color: "#6b7280", fontSize: "12px" }}>{e.date}</div>
+          {editingIndex === e.index ? (
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <input type="number" value={editValue} onChange={ev => setEditValue(ev.target.value)} autoFocus
+                style={{ width: "70px", background: "#0d1117", border: "1px solid #38bdf8", borderRadius: "6px", padding: "6px 8px", color: "#f9fafb", fontSize: "13px", outline: "none" }} />
+              <button onClick={() => saveEdit(e.index)} style={{ background: "#10b981", color: "#030712", border: "none", borderRadius: "6px", padding: "6px 10px", fontSize: "11px", fontWeight: "700", cursor: "pointer" }}>Save</button>
+              <div onClick={() => setEditingIndex(null)} style={{ color: "#6b7280", fontSize: "12px", cursor: "pointer", padding: "4px" }}>Cancel</div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <div style={{ color: "#f9fafb", fontSize: "14px", fontWeight: "700" }}>{e.weight} lbs</div>
+              <div onClick={() => startEdit(e)} style={{ color: "#38bdf8", fontSize: "12px", cursor: "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}>Edit</div>
+              <div onClick={() => onDelete(e.index)} style={{ color: "#ef4444", fontSize: "18px", cursor: "pointer", padding: "0 2px" }}>×</div>
+            </div>
+          )}
+        </div>
+      ))}
+      {log.length > 10 && <div style={{ color: "#4b5563", fontSize: "11px", marginTop: "8px", textAlign: "center" }}>Showing your last 10. Export My Data below for the full history.</div>}
     </div>
   );
 }
@@ -1688,6 +1859,19 @@ function ProfilePage({ data, onUpdate }) {
     setNewWeight("");
   }
 
+  // Edit fixes the number in place instead of appending a correction as a
+  // brand new point - that's what was skewing the chart and the Rate of
+  // Loss card, which reads the last 3 raw array entries.
+  function handleEditWeightEntry(index, newValue) {
+    const v = parseFloat(newValue);
+    if (!v) return;
+    const updated = data.weightLog.map((e, i) => i === index ? { ...e, weight: v } : e);
+    onUpdate({ ...data, weightLog: updated });
+  }
+  function handleDeleteWeightEntry(index) {
+    onUpdate({ ...data, weightLog: data.weightLog.filter((_, i) => i !== index) });
+  }
+
   return (
     <div style={{ padding: "20px" }}>
       <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "4px", marginBottom: "4px" }}>YOUR</div>
@@ -1725,6 +1909,8 @@ function ProfilePage({ data, onUpdate }) {
         </div>
         <div style={{ color: "#6b7280", fontSize: "11px", marginTop: "8px" }}>Weigh in first thing in the morning, before eating.</div>
       </div>
+
+      <WeightHistoryList log={data.weightLog} onEdit={handleEditWeightEntry} onDelete={handleDeleteWeightEntry} />
 
       {latest && <DietTargetsCard weight={latest.weight} />}
 
@@ -1976,6 +2162,12 @@ function GymPlanInner() {
     if (!existing) return;
     update({ sessionLog: { ...data.sessionLog, [sessionKey]: { ...existing, effort } } });
   }
+  function handleLogActivity(entry) {
+    update({ activityLog: [...(data.activityLog || []), entry] });
+  }
+  function handleDeleteActivity(index) {
+    update({ activityLog: (data.activityLog || []).filter((_, i) => i !== index) });
+  }
   function handleDifficultyChange(key, value) { update({ difficulty: { ...data.difficulty, [key]: value } }); }
   function handleMissedToggle(key) {
     const updated = { ...data.missed };
@@ -2206,7 +2398,7 @@ function GymPlanInner() {
       ) : page === "nutrition" ? (
         <NutritionPage nutritionLog={data.nutritionLog} latestWeight={data.weightLog[data.weightLog.length - 1]?.weight} onAddEntry={handleAddNutritionEntry} onDeleteEntry={handleDeleteNutritionEntry} />
       ) : page === "results" ? (
-        <ResultsPage sessionLog={data.sessionLog} onSetEffort={handleSetEffort} />
+        <ResultsPage sessionLog={data.sessionLog} activityLog={data.activityLog} weight={data.weightLog[data.weightLog.length - 1]?.weight} onSetEffort={handleSetEffort} onLogActivity={handleLogActivity} onDeleteActivity={handleDeleteActivity} />
       ) : day.flex ? (
         <FlexDayPage data={data} weights={data.weights} exerciseHistory={data.exerciseHistory} onJumpToDay={handleJumpToDay} onJumpToMaxes={() => setPage("maxes")} onToggleFlexCheck={handleFlexCheckToggle} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} zones={zones} />
       ) : (
