@@ -24,6 +24,33 @@ const { useState, useEffect, Component } = React;
 // ----------------------------------------------------------------------------
 // CHANGELOG
 //
+// v16  (Nutrition tab only - no other systems touched)
+//   - Carbs added to the Nutrition tab: target bar plus a Carbs(g) input.
+//     Target derives from calories minus protein and fat, so it already
+//     swings with training vs rest day the same way calories do.
+//   - Fiber(g) and Sodium(mg) added: targets plus input fields. Fiber
+//     scales at 14g per 1000 kcal. Sodium is rendered as a CEILING, not a
+//     goal - the bar turns red past the limit rather than green when hit,
+//     and it is excluded from the all-macros XP bonus so "ate nothing"
+//     can never read as a win.
+//   - Fixed the off-center macro bars. The label/value row had no
+//     alignItems, so the 11px value floated high against the 12px label.
+//     Added alignItems, matched line-heights, tabular numerals, and
+//     ellipsis handling so long labels can't shove the value off-edge.
+//   - Running daily totals strip pinned to the top of the Nutrition tab.
+//     Calories, protein, fat, carbs vs target, visible without scrolling
+//     and sticky while you scroll the rest of the tab.
+//   - Recipe portion divider. Enter each ingredient that went into a
+//     home-cooked meal, then either your share as a percentage or your
+//     plated weight in grams, and it returns just your portion. One tap
+//     logs it as an entry. Built for shared family meals.
+//   - Nutrition entry schema is now
+//     { name, grams, calories, protein, carbs, fat, fiber, sodium, water }.
+//     Pre-v16 entries are migrated in place on load under the SAME storage
+//     key (roberts_gym_v5), so no logged history is orphaned. The
+//     migration is idempotent and safe to run on every load. `water` is
+//     retained beyond the spec'd field list because the Water bar needs it.
+//
 // v15
 //   - Full split restructure: Push (Mon heavy / Thu light), Pull (Tue heavy /
 //     Fri light), Legs A · Quads (Wed), Legs B · Hams & Glutes (Sat).
@@ -134,11 +161,45 @@ const { useState, useEffect, Component } = React;
 // DATA LAYER
 // ============================================================================
 
-const APP_VERSION = "v15";
+const APP_VERSION = "v16";
 
 // Storage key is intentionally NOT tied to APP_VERSION.
 // Bumping the version must never wipe the weight log, 5RMs, or logged weights.
 const STORAGE_KEY = "roberts_gym_v5";
+
+// v16 nutrition entry schema:
+//   { name, grams, calories, protein, carbs, fat, fiber, sodium, water }
+//
+// Pre-v16 entries were { label, calories, protein, fat, water }. This migrates
+// them in place under the SAME storage key so no logged history is orphaned.
+// It is idempotent: entries already carrying a `name` are left untouched, so
+// it's safe to run on every load. `water` is kept beyond the spec'd field list
+// because the Water target bar still depends on it.
+function migrateNutritionEntry(e) {
+  if (!e || typeof e !== "object") return e;
+  if (e.name !== undefined && e.grams !== undefined) return e; // already v16
+  return {
+    name: e.name !== undefined ? e.name : (e.label || "Entry"),
+    grams: e.grams != null ? e.grams : null,
+    calories: e.calories || 0,
+    protein: e.protein || 0,
+    carbs: e.carbs || 0,
+    fat: e.fat || 0,
+    fiber: e.fiber || 0,
+    sodium: e.sodium || 0,
+    water: e.water || 0,
+  };
+}
+
+function migrateNutritionLog(log) {
+  if (!log || typeof log !== "object") return {};
+  const out = {};
+  for (const dateKey of Object.keys(log)) {
+    const entries = log[dateKey];
+    out[dateKey] = Array.isArray(entries) ? entries.map(migrateNutritionEntry) : [];
+  }
+  return out;
+}
 
 function loadData() {
   const defaults = {
@@ -153,7 +214,9 @@ function loadData() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const saved = JSON.parse(raw);
-      return { ...defaults, ...saved, profile: { ...defaults.profile, ...(saved.profile || {}) } };
+      const merged = { ...defaults, ...saved, profile: { ...defaults.profile, ...(saved.profile || {}) } };
+      merged.nutritionLog = migrateNutritionLog(merged.nutritionLog);
+      return merged;
     }
   } catch {}
   return defaults;
@@ -191,6 +254,14 @@ function getDietTargets(weight, restDay) {
     fatLow: Math.round(w * 0.3),
     fatHigh: Math.round(w * 0.4),
     carbTarget: carbs,
+    carbLow: Math.round(carbs * 0.85),
+    carbHigh: Math.round(carbs * 1.15),
+    // Fiber scales with calories (14g per 1000 kcal, the standard
+    // recommendation), so it moves with training vs rest day automatically.
+    fiberTarget: Math.round((calories / 1000) * 14),
+    // Sodium is a CEILING, not a goal. 2300mg is the standard daily limit.
+    // Training days get a little more room for sweat loss.
+    sodiumLimit: restDay ? 2300 : 2500,
     waterOz: Math.round(w * (restDay ? 0.5 : 0.6)),
   };
 }
@@ -249,8 +320,28 @@ function checkMacroHits(totals, targets) {
     calories: totals.calories >= targets.calories * 0.85 && totals.calories <= targets.calories * 1.15,
     protein: totals.protein >= targets.proteinLow,
     fat: totals.fat >= targets.fatLow && totals.fat <= targets.fatHigh,
+    carbs: totals.carbs >= targets.carbLow && totals.carbs <= targets.carbHigh,
+    fiber: totals.fiber >= targets.fiberTarget,
     water: totals.water >= targets.waterOz * 0.9,
+    // Sodium is inverted: "hit" means you stayed UNDER the ceiling. Only
+    // counts once you've actually logged food, so an empty day isn't a win.
+    sodium: totals.calories > 0 && totals.sodium <= targets.sodiumLimit,
   };
+}
+
+// Single source of truth for summing a day's entries. Used by both the
+// Nutrition tab and the XP award logic so the two can't drift apart.
+const EMPTY_TOTALS = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0, water: 0 };
+function sumEntries(entries) {
+  return (entries || []).reduce((acc, e) => ({
+    calories: acc.calories + (e.calories || 0),
+    protein: acc.protein + (e.protein || 0),
+    carbs: acc.carbs + (e.carbs || 0),
+    fat: acc.fat + (e.fat || 0),
+    fiber: acc.fiber + (e.fiber || 0),
+    sodium: acc.sodium + (e.sodium || 0),
+    water: acc.water + (e.water || 0),
+  }), { ...EMPTY_TOTALS });
 }
 
 function getRateOfLoss(log) {
@@ -1116,28 +1207,261 @@ function RateOfLossCard({ log }) {
 // PAGES
 // ============================================================================
 
-function NutritionBar({ label, current, target, unit, color, hit }) {
-  const pct = Math.min(100, Math.round((current / target) * 100)) || 0;
+// `limit` mode inverts the meaning: the bar is a ceiling to stay under
+// (sodium), so it goes red when exceeded instead of green when reached.
+function NutritionBar({ label, current, target, unit, color, hit, limit }) {
+  const pct = target > 0 ? Math.min(100, Math.round((current / target) * 100)) : 0;
+  const over = limit && current > target;
+  const fill = over ? "#ef4444" : (hit ? "#10b981" : color);
   return (
     <div style={{ marginBottom: "14px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "5px" }}>
-        <div style={{ color: "#d1d5db", fontSize: "12px", fontWeight: "700", display: "flex", alignItems: "center", gap: "5px" }}>
-          {label} {hit && <span style={{ color: "#10b981" }}>✓</span>}
+      {/* alignItems + matched lineHeight keep the label and the value on the
+          same optical baseline; without them the 11px value sat high against
+          the 12px label and the whole row read as off-center. */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px", lineHeight: 1 }}>
+        <div style={{ color: "#d1d5db", fontSize: "12px", fontWeight: "700", display: "flex", alignItems: "center", gap: "5px", lineHeight: 1, minWidth: 0 }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+          {hit && <span style={{ color: "#10b981", flexShrink: 0 }}>✓</span>}
+          {over && <span style={{ color: "#ef4444", flexShrink: 0 }}>!</span>}
         </div>
-        <div style={{ color: "#6b7280", fontSize: "11px" }}>{Math.round(current)}{unit} / {Math.round(target)}{unit}</div>
+        <div style={{ color: over ? "#ef4444" : "#6b7280", fontSize: "11px", lineHeight: 1, flexShrink: 0, marginLeft: "10px", fontVariantNumeric: "tabular-nums" }}>
+          {Math.round(current)}{unit} / {Math.round(target)}{unit}
+        </div>
       </div>
-      <div style={{ background: "#0d1117", borderRadius: "999px", height: "8px", overflow: "hidden" }}>
-        <div style={{ background: hit ? "#10b981" : color, height: "100%", width: `${pct}%`, borderRadius: "999px", transition: "width 0.3s" }} />
+      <div style={{ background: "#0d1117", borderRadius: "999px", height: "8px", overflow: "hidden", width: "100%" }}>
+        <div style={{ background: fill, height: "100%", width: `${pct}%`, borderRadius: "999px", transition: "width 0.3s" }} />
       </div>
+    </div>
+  );
+}
+
+// Compact always-visible summary. Sticks to the top of the scroll area so
+// you can see where you stand without scrolling back up.
+function DailyTotalsStrip({ totals, targets }) {
+  const cells = [
+    { key: "cal", label: "CAL", current: Math.round(totals.calories), target: targets.calories, color: "#f59e0b" },
+    { key: "pro", label: "PROTEIN", current: Math.round(totals.protein), target: targets.proteinTarget, color: "#10b981" },
+    { key: "fat", label: "FAT", current: Math.round(totals.fat), target: targets.fatTarget, color: "#f59e0b" },
+    { key: "carb", label: "CARBS", current: Math.round(totals.carbs), target: targets.carbTarget, color: "#38bdf8" },
+  ];
+  return (
+    <div style={{
+      position: "sticky", top: 0, zIndex: 20, background: "#0b1220",
+      borderBottom: "1px solid #1f2937", padding: "10px 12px",
+      marginLeft: "-20px", marginRight: "-20px", marginTop: "-20px", marginBottom: "16px",
+    }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px" }}>
+        {cells.map(c => {
+          const pct = c.target > 0 ? Math.min(100, Math.round((c.current / c.target) * 100)) : 0;
+          return (
+            <div key={c.key} style={{ textAlign: "center", minWidth: 0 }}>
+              <div style={{ color: "#4b5563", fontSize: "9px", letterSpacing: "1.5px", marginBottom: "3px" }}>{c.label}</div>
+              <div style={{ color: "#f9fafb", fontSize: "14px", fontWeight: "800", lineHeight: 1.1, fontVariantNumeric: "tabular-nums" }}>{c.current}</div>
+              <div style={{ color: "#4b5563", fontSize: "10px", lineHeight: 1.3, marginBottom: "4px", fontVariantNumeric: "tabular-nums" }}>/ {c.target}</div>
+              <div style={{ background: "#0d1117", borderRadius: "999px", height: "3px", overflow: "hidden" }}>
+                <div style={{ background: c.color, height: "100%", width: `${pct}%`, borderRadius: "999px", transition: "width 0.3s" }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Recipe portion divider. Enter what went INTO the pot, then either the
+// percentage you ate or your plated weight in grams, and it returns just
+// your share. Built for shared family meals where your portion differs
+// from what was cooked.
+const BLANK_INGREDIENT = { name: "", grams: "", calories: "", protein: "", carbs: "", fat: "", fiber: "", sodium: "" };
+
+function RecipeDivider({ onLogPortion }) {
+  const [open, setOpen] = useState(false);
+  const [recipeName, setRecipeName] = useState("");
+  const [rows, setRows] = useState([{ ...BLANK_INGREDIENT }]);
+  const [mode, setMode] = useState("percent"); // "percent" | "grams"
+  const [portionPct, setPortionPct] = useState("");
+  const [platedGrams, setPlatedGrams] = useState("");
+
+  const n = v => parseFloat(v) || 0;
+
+  const recipeTotals = rows.reduce((acc, r) => ({
+    grams: acc.grams + n(r.grams),
+    calories: acc.calories + n(r.calories),
+    protein: acc.protein + n(r.protein),
+    carbs: acc.carbs + n(r.carbs),
+    fat: acc.fat + n(r.fat),
+    fiber: acc.fiber + n(r.fiber),
+    sodium: acc.sodium + n(r.sodium),
+  }), { grams: 0, calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0 });
+
+  // Fraction of the whole recipe that ends up on your plate.
+  let fraction = 0;
+  let fractionNote = "";
+  if (mode === "percent") {
+    fraction = n(portionPct) / 100;
+    if (fraction > 0) fractionNote = `${Math.round(fraction * 100)}% of the batch`;
+  } else {
+    // Cooked weight differs from raw ingredient weight (water loss, water
+    // absorbed by pasta/rice), so this is an approximation. Flagged in the UI.
+    if (recipeTotals.grams > 0) {
+      fraction = n(platedGrams) / recipeTotals.grams;
+      if (fraction > 0) fractionNote = `${n(platedGrams)}g of ${Math.round(recipeTotals.grams)}g total`;
+    }
+  }
+  const valid = fraction > 0 && recipeTotals.calories > 0;
+
+  const portion = {
+    grams: Math.round(recipeTotals.grams * fraction),
+    calories: Math.round(recipeTotals.calories * fraction),
+    protein: Math.round(recipeTotals.protein * fraction),
+    carbs: Math.round(recipeTotals.carbs * fraction),
+    fat: Math.round(recipeTotals.fat * fraction),
+    fiber: Math.round(recipeTotals.fiber * fraction),
+    sodium: Math.round(recipeTotals.sodium * fraction),
+  };
+
+  function updateRow(i, field, value) {
+    setRows(rs => rs.map((r, idx) => idx === i ? { ...r, [field]: value } : r));
+  }
+  function addRow() { setRows(rs => [...rs, { ...BLANK_INGREDIENT }]); }
+  function removeRow(i) { setRows(rs => rs.length === 1 ? rs : rs.filter((_, idx) => idx !== i)); }
+
+  function handleLog() {
+    if (!valid) return;
+    onLogPortion({
+      name: recipeName ? `${recipeName} (my portion)` : "Recipe portion",
+      grams: portion.grams || null,
+      calories: portion.calories,
+      protein: portion.protein,
+      carbs: portion.carbs,
+      fat: portion.fat,
+      fiber: portion.fiber,
+      sodium: portion.sodium,
+      water: 0,
+    });
+    setRecipeName(""); setRows([{ ...BLANK_INGREDIENT }]);
+    setPortionPct(""); setPlatedGrams("");
+    setOpen(false);
+  }
+
+  const inputBase = { background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "9px 10px", color: "#f9fafb", fontSize: "13px", width: "100%", boxSizing: "border-box", outline: "none" };
+  const miniInput = { ...inputBase, padding: "8px 8px", fontSize: "12px" };
+
+  return (
+    <div style={{ background: "#111827", borderRadius: "12px", marginBottom: "20px", border: "1px solid #1f2937", overflow: "hidden" }}>
+      <div onClick={() => setOpen(o => !o)} style={{ padding: "16px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ color: "#a855f7", fontSize: "10px", letterSpacing: "3px", marginBottom: "4px" }}>RECIPE PORTION DIVIDER</div>
+          <div style={{ color: "#6b7280", fontSize: "12px" }}>Cooked for the family? Get just your share.</div>
+        </div>
+        <div style={{ color: "#a855f7", fontSize: "20px", transform: open ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>›</div>
+      </div>
+
+      {open && (
+        <div style={{ borderTop: "1px solid #a855f733", padding: "16px", background: "#0a0f1a" }}>
+          <input value={recipeName} onChange={e => setRecipeName(e.target.value)} placeholder="Recipe name (e.g. Cajun pasta)" style={{ ...inputBase, marginBottom: "12px" }} />
+
+          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "2px", marginBottom: "8px" }}>WHAT WENT IN</div>
+          {rows.map((r, i) => (
+            <div key={i} style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: "10px", padding: "10px", marginBottom: "8px" }}>
+              <div style={{ display: "flex", gap: "6px", marginBottom: "6px" }}>
+                <input value={r.name} onChange={e => updateRow(i, "name", e.target.value)} placeholder={i === 0 ? "Ingredient (e.g. dry pasta)" : "Ingredient"} style={{ ...miniInput, flex: 2 }} />
+                <input value={r.grams} onChange={e => updateRow(i, "grams", e.target.value)} type="number" inputMode="decimal" placeholder="g" style={{ ...miniInput, flex: 1 }} />
+                {rows.length > 1 && (
+                  <div onClick={() => removeRow(i)} style={{ color: "#ef4444", fontSize: "18px", cursor: "pointer", padding: "4px 6px", flexShrink: 0 }}>×</div>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "6px" }}>
+                <input value={r.calories} onChange={e => updateRow(i, "calories", e.target.value)} type="number" inputMode="decimal" placeholder="Cal" style={miniInput} />
+                <input value={r.protein} onChange={e => updateRow(i, "protein", e.target.value)} type="number" inputMode="decimal" placeholder="P (g)" style={miniInput} />
+                <input value={r.carbs} onChange={e => updateRow(i, "carbs", e.target.value)} type="number" inputMode="decimal" placeholder="C (g)" style={miniInput} />
+                <input value={r.fat} onChange={e => updateRow(i, "fat", e.target.value)} type="number" inputMode="decimal" placeholder="F (g)" style={miniInput} />
+                <input value={r.fiber} onChange={e => updateRow(i, "fiber", e.target.value)} type="number" inputMode="decimal" placeholder="Fib (g)" style={miniInput} />
+                <input value={r.sodium} onChange={e => updateRow(i, "sodium", e.target.value)} type="number" inputMode="decimal" placeholder="Na (mg)" style={miniInput} />
+              </div>
+            </div>
+          ))}
+
+          <button onClick={addRow} style={{ width: "100%", background: "#1f2937", color: "#9ca3af", border: "1px dashed #374151", borderRadius: "8px", padding: "10px", fontSize: "12px", fontWeight: "700", cursor: "pointer", marginBottom: "14px" }}>
+            + Add ingredient
+          </button>
+
+          {recipeTotals.calories > 0 && (
+            <div style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", marginBottom: "14px" }}>
+              <div style={{ color: "#4b5563", fontSize: "9px", letterSpacing: "2px", marginBottom: "4px" }}>WHOLE RECIPE</div>
+              <div style={{ color: "#9ca3af", fontSize: "12px" }}>
+                {Math.round(recipeTotals.calories)} cal · {Math.round(recipeTotals.protein)}g P · {Math.round(recipeTotals.carbs)}g C · {Math.round(recipeTotals.fat)}g F
+                {recipeTotals.grams > 0 && <span> · {Math.round(recipeTotals.grams)}g</span>}
+              </div>
+            </div>
+          )}
+
+          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "2px", marginBottom: "8px" }}>YOUR PORTION</div>
+          <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
+            {[{ k: "percent", l: "By %" }, { k: "grams", l: "By plated grams" }].map(m => (
+              <button key={m.k} onClick={() => setMode(m.k)} style={{
+                flex: 1, background: mode === m.k ? "#a855f7" : "#1f2937", color: mode === m.k ? "#030712" : "#9ca3af",
+                border: "none", borderRadius: "8px", padding: "9px", fontSize: "12px", fontWeight: "700", cursor: "pointer",
+              }}>{m.l}</button>
+            ))}
+          </div>
+
+          {mode === "percent" ? (
+            <div style={{ marginBottom: "12px" }}>
+              <input value={portionPct} onChange={e => setPortionPct(e.target.value)} type="number" inputMode="decimal" placeholder="Your share as a % (e.g. 30)" style={inputBase} />
+              <div style={{ display: "flex", gap: "6px", marginTop: "8px" }}>
+                {[25, 33, 50].map(p => (
+                  <button key={p} onClick={() => setPortionPct(String(p))} style={{ flex: 1, background: "#1f2937", color: "#9ca3af", border: "1px solid #374151", borderRadius: "8px", padding: "7px", fontSize: "11px", fontWeight: "700", cursor: "pointer" }}>
+                    {p === 25 ? "1/4" : p === 33 ? "1/3" : "1/2"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginBottom: "12px" }}>
+              <input value={platedGrams} onChange={e => setPlatedGrams(e.target.value)} type="number" inputMode="decimal" placeholder="Your plated weight (g)" style={inputBase} />
+              <div style={{ color: "#6b7280", fontSize: "11px", marginTop: "6px", lineHeight: 1.4 }}>
+                Compares against the raw ingredient weight above. Pasta and rice absorb water while cooking, so plated grams will read heavier than raw. Use % for those.
+              </div>
+            </div>
+          )}
+
+          {valid && (
+            <div style={{ background: "#a855f715", border: "1px solid #a855f755", borderRadius: "10px", padding: "12px", marginBottom: "12px" }}>
+              <div style={{ color: "#a855f7", fontSize: "9px", letterSpacing: "2px", marginBottom: "6px" }}>YOUR MACROS · {fractionNote.toUpperCase()}</div>
+              <div style={{ color: "#f9fafb", fontSize: "15px", fontWeight: "800", marginBottom: "4px" }}>{portion.calories} cal</div>
+              <div style={{ color: "#9ca3af", fontSize: "12px" }}>
+                {portion.protein}g protein · {portion.carbs}g carbs · {portion.fat}g fat
+              </div>
+              <div style={{ color: "#6b7280", fontSize: "11px", marginTop: "2px" }}>
+                {portion.fiber}g fiber · {portion.sodium}mg sodium
+              </div>
+            </div>
+          )}
+
+          <button onClick={handleLog} disabled={!valid} style={{
+            width: "100%", background: valid ? "#a855f7" : "#1f2937", color: valid ? "#030712" : "#4b5563",
+            border: "none", borderRadius: "8px", padding: "12px", fontSize: "13px", fontWeight: "800",
+            cursor: valid ? "pointer" : "default",
+          }}>
+            {valid ? "Log my portion" : "Enter ingredients and your share"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }) {
   const [label, setLabel] = useState("");
+  const [grams, setGrams] = useState("");
   const [cal, setCal] = useState("");
   const [pro, setPro] = useState("");
+  const [carb, setCarb] = useState("");
   const [fat, setFat] = useState("");
+  const [fiber, setFiber] = useState("");
+  const [sodium, setSodium] = useState("");
   const [water, setWater] = useState("");
 
   const dateKey = getDateKey(new Date());
@@ -1145,33 +1469,36 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
   const targets = getDietTargets(latestWeight || 200, isRestDay);
   const entries = nutritionLog[dateKey] || [];
 
-  const totals = entries.reduce((acc, e) => ({
-    calories: acc.calories + (e.calories || 0),
-    protein: acc.protein + (e.protein || 0),
-    fat: acc.fat + (e.fat || 0),
-    water: acc.water + (e.water || 0),
-  }), { calories: 0, protein: 0, fat: 0, water: 0 });
-
+  const totals = sumEntries(entries);
   const hits = targets ? checkMacroHits(totals, targets) : {};
 
   function handleAdd() {
-    if (!cal && !pro && !fat && !water) return;
+    if (!cal && !pro && !carb && !fat && !fiber && !sodium && !water) return;
     onAddEntry(dateKey, {
-      label: label || "Entry",
+      name: label || "Entry",
+      grams: parseFloat(grams) || null,
       calories: parseFloat(cal) || 0,
       protein: parseFloat(pro) || 0,
+      carbs: parseFloat(carb) || 0,
       fat: parseFloat(fat) || 0,
+      fiber: parseFloat(fiber) || 0,
+      sodium: parseFloat(sodium) || 0,
       water: parseFloat(water) || 0,
     });
-    setLabel(""); setCal(""); setPro(""); setFat(""); setWater("");
+    setLabel(""); setGrams(""); setCal(""); setPro(""); setCarb("");
+    setFat(""); setFiber(""); setSodium(""); setWater("");
   }
 
   if (!targets) {
     return <div style={{ padding: "20px", color: "#6b7280", fontSize: "13px" }}>Log a weight on the Progress tab first, targets are calculated from your bodyweight.</div>;
   }
 
+  const entryInput = { background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "13px", width: "100%", boxSizing: "border-box", outline: "none" };
+
   return (
     <div style={{ padding: "20px" }}>
+      <DailyTotalsStrip totals={totals} targets={targets} />
+
       <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Nutrition</div>
       <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>
         {isRestDay ? "Rest day targets" : "Training day targets"} · based on {latestWeight} lbs
@@ -1180,18 +1507,32 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
       <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "20px", border: "1px solid #1f2937" }}>
         <NutritionBar label="Calories" current={totals.calories} target={targets.calories} unit="" color="#f59e0b" hit={hits.calories} />
         <NutritionBar label="Protein" current={totals.protein} target={targets.proteinTarget} unit="g" color="#10b981" hit={hits.protein} />
+        <NutritionBar label="Carbs" current={totals.carbs} target={targets.carbTarget} unit="g" color="#38bdf8" hit={hits.carbs} />
         <NutritionBar label="Fat" current={totals.fat} target={targets.fatTarget} unit="g" color="#f59e0b" hit={hits.fat} />
+        <NutritionBar label="Fiber" current={totals.fiber} target={targets.fiberTarget} unit="g" color="#84cc16" hit={hits.fiber} />
+        <NutritionBar label="Sodium" current={totals.sodium} target={targets.sodiumLimit} unit="mg" color="#f97316" hit={hits.sodium} limit />
         <NutritionBar label="Water" current={totals.water} target={targets.waterOz} unit="oz" color="#8b5cf6" hit={hits.water} />
+        <div style={{ color: "#4b5563", fontSize: "11px", lineHeight: 1.4, marginTop: "2px" }}>
+          Sodium is a ceiling, not a goal. The bar turns red past {targets.sodiumLimit}mg.
+        </div>
       </div>
+
+      <RecipeDivider onLogPortion={(entry) => onAddEntry(dateKey, entry)} />
 
       <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "20px", border: "1px solid #1f2937" }}>
         <div style={{ color: "#38bdf8", fontSize: "10px", letterSpacing: "3px", marginBottom: "12px" }}>LOG AN ENTRY</div>
-        <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Label (optional, e.g. lunch)" style={{ width: "100%", background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "13px", marginBottom: "8px" }} />
+        <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+          <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Name (optional, e.g. lunch)" style={{ ...entryInput, flex: 2 }} />
+          <input value={grams} onChange={e => setGrams(e.target.value)} type="number" inputMode="decimal" placeholder="Grams" style={{ ...entryInput, flex: 1 }} />
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
-          <input value={cal} onChange={e => setCal(e.target.value)} type="number" inputMode="decimal" placeholder="Calories" style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "13px" }} />
-          <input value={pro} onChange={e => setPro(e.target.value)} type="number" inputMode="decimal" placeholder="Protein (g)" style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "13px" }} />
-          <input value={fat} onChange={e => setFat(e.target.value)} type="number" inputMode="decimal" placeholder="Fat (g)" style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "13px" }} />
-          <input value={water} onChange={e => setWater(e.target.value)} type="number" inputMode="decimal" placeholder="Water (oz)" style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "13px" }} />
+          <input value={cal} onChange={e => setCal(e.target.value)} type="number" inputMode="decimal" placeholder="Calories" style={entryInput} />
+          <input value={pro} onChange={e => setPro(e.target.value)} type="number" inputMode="decimal" placeholder="Protein (g)" style={entryInput} />
+          <input value={carb} onChange={e => setCarb(e.target.value)} type="number" inputMode="decimal" placeholder="Carbs (g)" style={entryInput} />
+          <input value={fat} onChange={e => setFat(e.target.value)} type="number" inputMode="decimal" placeholder="Fat (g)" style={entryInput} />
+          <input value={fiber} onChange={e => setFiber(e.target.value)} type="number" inputMode="decimal" placeholder="Fiber (g)" style={entryInput} />
+          <input value={sodium} onChange={e => setSodium(e.target.value)} type="number" inputMode="decimal" placeholder="Sodium (mg)" style={entryInput} />
+          <input value={water} onChange={e => setWater(e.target.value)} type="number" inputMode="decimal" placeholder="Water (oz)" style={entryInput} />
         </div>
         <button onClick={handleAdd} style={{ width: "100%", background: "#38bdf822", color: "#38bdf8", border: "1px solid #38bdf855", borderRadius: "8px", padding: "12px", fontSize: "13px", fontWeight: "700", cursor: "pointer" }}>
           Add Entry
@@ -1203,11 +1544,18 @@ function NutritionPage({ nutritionLog, latestWeight, onAddEntry, onDeleteEntry }
           <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "10px" }}>TODAY'S ENTRIES</div>
           {entries.map((e, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < entries.length - 1 ? "1px solid #1f2937" : "none" }}>
-              <div>
-                <div style={{ color: "#d1d5db", fontSize: "13px", fontWeight: "600" }}>{e.label}</div>
-                <div style={{ color: "#6b7280", fontSize: "11px" }}>{e.calories} cal · {e.protein}g P · {e.fat}g F · {e.water}oz</div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ color: "#d1d5db", fontSize: "13px", fontWeight: "600" }}>
+                  {e.name || e.label || "Entry"}{e.grams ? <span style={{ color: "#4b5563", fontWeight: "400" }}> · {e.grams}g</span> : null}
+                </div>
+                <div style={{ color: "#6b7280", fontSize: "11px" }}>
+                  {e.calories || 0} cal · {e.protein || 0}g P · {e.carbs || 0}g C · {e.fat || 0}g F
+                </div>
+                <div style={{ color: "#4b5563", fontSize: "11px" }}>
+                  {e.fiber || 0}g fiber · {e.sodium || 0}mg Na{e.water ? ` · ${e.water}oz` : ""}
+                </div>
               </div>
-              <div onClick={() => onDeleteEntry(dateKey, i)} style={{ color: "#ef4444", fontSize: "18px", cursor: "pointer", padding: "4px 8px" }}>×</div>
+              <div onClick={() => onDeleteEntry(dateKey, i)} style={{ color: "#ef4444", fontSize: "18px", cursor: "pointer", padding: "4px 8px", flexShrink: 0 }}>×</div>
             </div>
           ))}
         </div>
@@ -1756,19 +2104,19 @@ function GymPlanInner() {
     const isRestDay = new Date().getDay() === 0;
     const targets = getDietTargets(latestWeight || 200, isRestDay);
     if (!targets) return;
-    const totals = updated[dateKey].reduce((acc, e) => ({
-      calories: acc.calories + (e.calories || 0),
-      protein: acc.protein + (e.protein || 0),
-      fat: acc.fat + (e.fat || 0),
-      water: acc.water + (e.water || 0),
-    }), { calories: 0, protein: 0, fat: 0, water: 0 });
+    const totals = sumEntries(updated[dateKey]);
     const hits = checkMacroHits(totals, targets);
 
     const awards = [];
     if (hits.calories) awards.push({ reasonKey: `xp_cal_${dateKey}`, amount: 5, label: "Calorie target hit", color: "#f59e0b" });
     if (hits.protein) awards.push({ reasonKey: `xp_protein_${dateKey}`, amount: 5, label: "Protein target hit", color: "#10b981" });
+    if (hits.carbs) awards.push({ reasonKey: `xp_carbs_${dateKey}`, amount: 5, label: "Carb target hit", color: "#38bdf8" });
     if (hits.fat) awards.push({ reasonKey: `xp_fat_${dateKey}`, amount: 5, label: "Fat target hit", color: "#f59e0b" });
+    if (hits.fiber) awards.push({ reasonKey: `xp_fiber_${dateKey}`, amount: 5, label: "Fiber target hit", color: "#84cc16" });
     if (hits.water) awards.push({ reasonKey: `xp_water_${dateKey}`, amount: 5, label: "Water target hit", color: "#8b5cf6" });
+    // Original four macros still gate the bonus. Sodium is deliberately left
+    // out: it's a ceiling you can satisfy by simply not eating, so rewarding
+    // it would push the wrong direction.
     if (hits.calories && hits.protein && hits.fat && hits.water) {
       awards.push({ reasonKey: `xp_allmacros_${dateKey}`, amount: 10, label: "All macros hit today! 🎯", color: "#a855f7" });
     }
