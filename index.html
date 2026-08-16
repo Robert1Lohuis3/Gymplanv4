@@ -24,6 +24,53 @@ const { useState, useEffect, useRef, Component } = React;
 // ----------------------------------------------------------------------------
 // CHANGELOG
 //
+// v20
+//   - 5RM tab is now tier-aware for the 4 lifts that have equipment
+//     variants (Chest Press, Squat, Overhead Press, Seated Cable Row).
+//     Tap Beginner/Intermediate/Advanced right on the 5RM card and log a
+//     separate number for whichever equipment you actually used, instead
+//     of one flat number that only ever meant the barbell version. Fixes
+//     the real problem: when a rack or station is unavailable, there was
+//     no way to log a max for what you could actually do. Working-weight
+//     targets on the Workout tab now read the max for whichever tier is
+//     currently selected on that exercise card, so switching tiers there
+//     pulls the right number automatically.
+//   - Migrated old flat 5RM entries to "_advanced" (the only variant that
+//     existed before this fix) so no real logged number gets orphaned.
+//     Untiered lifts (Romanian Deadlift, Leg Press) are unaffected, they
+//     never had variants and still use one flat number.
+//   - Removed "Barbell Bent-Over Row" from the 5RM tab, it was left over
+//     from before the Push/Pull/Legs rewrite and no longer matches
+//     anything in the actual split (that blank row you saw).
+//   - Sunday's "max testing due" nudge updated to match: a tiered lift
+//     only counts as due if every one of its variants is stale, so
+//     testing whichever equipment was free still keeps it current.
+//
+// v19
+//   - Week boundary switched from Sunday-start to Monday-start (ISO 8601).
+//     This wasn't cosmetic: Sunday is Flex Day, meant to catch up on
+//     anything missed Mon-Sat, but a Sunday-start week put Sunday in a
+//     brand new week bucket, so a Friday miss became invisible the moment
+//     Sunday arrived. Verified Mon-Sun of the same calendar week now share
+//     one key, a Friday miss and its Sunday makeup match, and the
+//     year-boundary edge case (Dec 28 - Jan 3) still resolves correctly.
+//   - Week Recap card added to the top of Sunday's Flex Day: lift days
+//     completed, days nutrition hit target, weight change since Monday,
+//     XP earned this week. No forced redirect - it just sits at the top
+//     of the page you already land on every Sunday.
+//
+// v18  (bugfix only - no other systems touched)
+//   - Fixed a real data-loss bug: logging a nutrition entry that also
+//     crossed an XP threshold would grant the XP but silently revert the
+//     entry you'd just added. Root cause was update() merging its patch
+//     against a stale closure variable instead of the latest state, so
+//     the XP-award's own update() call (fired right after the entry's
+//     update() call, in the same handler) clobbered it. Same bug also
+//     affected workout-day completion and Flex Day completion whenever
+//     they crossed an XP threshold - both are fixed by this one change.
+//     Verified by reproducing the exact bug in isolation, then confirming
+//     the fix resolves it, before touching the real file.
+//
 // v17
 //   - Manual cardio/activity logging. New "Log Activity" card on the
 //     Results tab: pick Walk/Run/Bike/Hike/Other, enter minutes, get an
@@ -179,7 +226,7 @@ const { useState, useEffect, useRef, Component } = React;
 // DATA LAYER
 // ============================================================================
 
-const APP_VERSION = "v17";
+const APP_VERSION = "v20";
 
 // Storage key is intentionally NOT tied to APP_VERSION.
 // Bumping the version must never wipe the weight log, 5RMs, or logged weights.
@@ -234,6 +281,7 @@ function loadData() {
       const saved = JSON.parse(raw);
       const merged = { ...defaults, ...saved, profile: { ...defaults.profile, ...(saved.profile || {}) } };
       merged.nutritionLog = migrateNutritionLog(merged.nutritionLog);
+      merged.maxes = migrateMaxes(merged.maxes);
       return merged;
     }
   } catch {}
@@ -433,10 +481,21 @@ function getWorkingWeight(max) {
   return Math.round((parseFloat(max) * 0.75) / 5) * 5;
 }
 
+// Monday-start week (ISO 8601), not Sunday-start. This matters specifically
+// because Sunday is Flex Day, the day meant to catch up on anything missed
+// Mon-Sat. A Sunday-start week boundary put Sunday in a brand new week
+// bucket, so a Friday miss became invisible the moment Sunday arrived,
+// the exact "resets my whole week" symptom. ISO weeks run Mon-Sun, so a
+// Friday miss and its Sunday makeup now share the same week key.
 function getWeekKey(d) {
   const date = new Date(d);
-  const onejan = new Date(date.getFullYear(), 0, 1);
-  const week = Math.ceil((((date - onejan) / 86400000) + onejan.getDay() + 1) / 7);
+  date.setHours(0, 0, 0, 0);
+  const dayNum = (date.getDay() + 6) % 7; // Mon=0 ... Sun=6
+  date.setDate(date.getDate() - dayNum + 3); // Thursday of this ISO week
+  const firstThursday = new Date(date.getFullYear(), 0, 4);
+  const firstDayNum = (firstThursday.getDay() + 6) % 7;
+  firstThursday.setDate(firstThursday.getDate() - firstDayNum + 3);
+  const week = 1 + Math.round((date - firstThursday) / (7 * 86400000));
   return `${date.getFullYear()}-W${week}`;
 }
 
@@ -448,6 +507,34 @@ function getDateKey(d) {
   return `${y}-${m}-${day}`;
 }
 
+// The 7 dateKeys (Mon-Sun) for the ISO week containing d. Used by the
+// Sunday Week Recap so "this week" always means the same Mon-Sun block
+// getWeekKey groups things into.
+function getWeekDates(d) {
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  const dayNum = (date.getDay() + 6) % 7; // Mon=0 ... Sun=6
+  const monday = new Date(date);
+  monday.setDate(date.getDate() - dayNum);
+  const result = [];
+  for (let i = 0; i < 7; i++) {
+    const dd = new Date(monday);
+    dd.setDate(monday.getDate() + i);
+    result.push(getDateKey(dd));
+  }
+  return result;
+}
+
+// xpLog only stores {reasonKey: true}, no amount, so the weekly XP total is
+// reconstructed from the fixed amount each reasonKey prefix always awards.
+function xpAmountForReasonKey(key) {
+  if (key.startsWith("xp_allmacros_")) return 10;
+  if (key.startsWith("xp_workout_")) return 30;
+  if (key.startsWith("xp_flex_")) return 15;
+  if (key.startsWith("xp_cal_") || key.startsWith("xp_protein_") || key.startsWith("xp_carbs_") || key.startsWith("xp_fat_") || key.startsWith("xp_fiber_") || key.startsWith("xp_water_")) return 5;
+  return 0;
+}
+
 const restPeriods = {
   compound: { label: "90 sec - 2 min", seconds: 105 },
   isolation: { label: "45-60 sec", seconds: 50 },
@@ -455,14 +542,39 @@ const restPeriods = {
 };
 
 const compoundLifts = [
-  { key: "bench", name: "Barbell Bench Press" },
-  { key: "squat", name: "Barbell Squat" },
-  { key: "rdl", name: "Romanian Deadlift" },
-  { key: "ohp", name: "Barbell Overhead Press" },
-  { key: "bbrow", name: "Barbell Bent-Over Row" },
-  { key: "cablerow", name: "Seated Cable Row" },
-  { key: "legpress", name: "Leg Press" },
+  { key: "bench", name: "Chest Press", tiered: true },
+  { key: "squat", name: "Squat", tiered: true },
+  { key: "ohp", name: "Overhead Press", tiered: true },
+  { key: "cablerow", name: "Seated Cable Row", tiered: true },
+  { key: "rdl", name: "Romanian Deadlift", tiered: false },
+  { key: "legpress", name: "Leg Press", tiered: false },
 ];
+
+// Real per-tier exercise names for the 5RM tab, mirrored from each lift's
+// `tiers` object in the days array. Kept as a standalone lookup so
+// MaxTracker doesn't need to search the days array to find them.
+const tierNames = {
+  bench: { beginner: "Seated Chest Press (Machine)", intermediate: "Dumbbell Bench Press", advanced: "Barbell Bench Press" },
+  squat: { beginner: "Bulgarian Split Squat", intermediate: "Goblet Squat", advanced: "Barbell Back Squat" },
+  ohp: { beginner: "Seated Shoulder Press (Machine)", intermediate: "Dumbbell Shoulder Press", advanced: "Barbell Overhead Press" },
+  cablerow: { beginner: "Seated Cable Row (Light, Supported)", intermediate: "Seated Cable Row (Rope)", advanced: "Barbell Bent-Over Row" },
+};
+
+// Pre-v20, maxes was flat: one number per lift, always implicitly the
+// Advanced/barbell variant since that was the only thing the 5RM tab
+// offered. Migrates each tiered lift's old flat entry to `_advanced` so a
+// real logged number never gets orphaned. Untouched if already migrated.
+function migrateMaxes(maxes) {
+  if (!maxes || typeof maxes !== "object") return {};
+  const out = { ...maxes };
+  compoundLifts.filter(l => l.tiered).forEach(({ key }) => {
+    const hasTieredData = out[`${key}_beginner`] || out[`${key}_intermediate`] || out[`${key}_advanced`];
+    if (out[key] && !hasTieredData) {
+      out[`${key}_advanced`] = out[key];
+    }
+  });
+  return out;
+}
 
 const universalStretches = [
   { name: "Neck Rolls", detail: "10 reps each direction" },
@@ -852,7 +964,13 @@ function ExerciseCard({ exercise, sectionColor, dayId, weights, maxes, difficult
   const active = exercise.tiers ? (exercise.tiers[currentTier] || exercise.tiers.intermediate) : exercise;
   const exerciseKey = `${baseKey}_${currentTier}`;
   const hasWeight = weights[exerciseKey]?.weight;
-  const working = exercise.maxKey && maxes[exercise.maxKey] ? getWorkingWeight(maxes[exercise.maxKey].weight) : null;
+  // Tiered lifts (Chest Press, Squat, Overhead Press, Seated Cable Row) track
+  // a separate 5RM per equipment variant, since a Goblet Squat max and a
+  // Barbell Back Squat max aren't the same lift. Untiered lifts (Romanian
+  // Deadlift, Leg Press) keep one flat key, same as before.
+  const tierSuffix = exercise.tiers ? `_${currentTier}` : "";
+  const maxKeyForTier = exercise.maxKey ? `${exercise.maxKey}${tierSuffix}` : null;
+  const working = maxKeyForTier && maxes[maxKeyForTier] ? getWorkingWeight(maxes[maxKeyForTier].weight) : null;
   const setsRepsOverride = customSetsReps[baseKey];
   const displaySets = setsRepsOverride?.sets ?? exercise.sets;
   const displayReps = setsRepsOverride?.reps ?? exercise.reps;
@@ -897,7 +1015,7 @@ function ExerciseCard({ exercise, sectionColor, dayId, weights, maxes, difficult
           ))}
           <SetsRepsEditor baseKey={baseKey} exercise={exercise} customSetsReps={customSetsReps} onChange={onSetsRepsChange} />
           <RestTimer restType={exercise.restType} />
-          <WeightLogger exerciseKey={exerciseKey} weights={weights} maxKey={exercise.maxKey} maxes={maxes} history={exerciseHistory[exerciseKey]} onChange={onWeightChange} onLog={onLogHistory} />
+          <WeightLogger exerciseKey={exerciseKey} weights={weights} maxKey={maxKeyForTier} maxes={maxes} history={exerciseHistory[exerciseKey]} onChange={onWeightChange} onLog={onLogHistory} />
         </div>
       )}
     </div>
@@ -1959,6 +2077,23 @@ function ProfilePage({ data, onUpdate }) {
 function MaxTracker({ maxes, onSave }) {
   const [editing, setEditing] = useState({});
   const [saved, setSaved] = useState(false);
+  // Which tier is being viewed/edited per tiered lift. Defaults to
+  // whichever tier has the most recent loggedAt, so reopening this tab
+  // shows what you actually tested last, not a fixed default.
+  const [selectedTier, setSelectedTier] = useState(() => {
+    const initial = {};
+    compoundLifts.filter(l => l.tiered).forEach(({ key }) => {
+      const tiers = ["beginner", "intermediate", "advanced"];
+      const withData = tiers.filter(t => maxes[`${key}_${t}`]);
+      if (withData.length === 0) { initial[key] = "intermediate"; return; }
+      initial[key] = withData.sort((a, b) => new Date(maxes[`${key}_${b}`]?.loggedAt || 0) - new Date(maxes[`${key}_${a}`]?.loggedAt || 0))[0];
+    });
+    return initial;
+  });
+
+  function storageKeyFor(lift) {
+    return lift.tiered ? `${lift.key}_${selectedTier[lift.key] || "intermediate"}` : lift.key;
+  }
 
   function handleSave() {
     // Only stamp a fresh date/loggedAt on lifts you actually typed a new
@@ -1968,9 +2103,10 @@ function MaxTracker({ maxes, onSave }) {
     const nowLabel = new Date().toLocaleDateString("en-US", { month: "short", year: "numeric" });
     const nowIso = new Date().toISOString();
     const updated = { ...maxes };
-    compoundLifts.forEach(l => {
-      if (editing[l.key] !== undefined && editing[l.key] !== "") {
-        updated[l.key] = { weight: editing[l.key], date: nowLabel, loggedAt: nowIso };
+    compoundLifts.forEach(lift => {
+      const storageKey = storageKeyFor(lift);
+      if (editing[storageKey] !== undefined && editing[storageKey] !== "") {
+        updated[storageKey] = { weight: editing[storageKey], date: nowLabel, loggedAt: nowIso };
       }
     });
     onSave(updated);
@@ -1982,17 +2118,33 @@ function MaxTracker({ maxes, onSave }) {
     <div style={{ padding: "20px" }}>
       <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "4px", marginBottom: "4px" }}>MONTHLY</div>
       <div style={{ color: "#f9fafb", fontSize: "22px", fontWeight: "800", letterSpacing: "-0.5px", marginBottom: "8px" }}>5-Rep Max Tracker</div>
-      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Log your best 5-rep weight once a month. Working weight calculates at 75%.</div>
+      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Log your best 5-rep weight once a month. Working weight calculates at 75%. If your usual rack or station is tied up, switch tiers below, each tracks its own number.</div>
 
       {compoundLifts.map(lift => {
-        const existing = maxes[lift.key];
-        const currentVal = editing[lift.key] !== undefined ? editing[lift.key] : (existing?.weight || "");
+        const storageKey = storageKeyFor(lift);
+        const existing = maxes[storageKey];
+        const currentVal = editing[storageKey] !== undefined ? editing[storageKey] : (existing?.weight || "");
         const working = getWorkingWeight(currentVal);
+        const displayName = lift.tiered ? tierNames[lift.key][selectedTier[lift.key] || "intermediate"] : lift.name;
         return (
           <div key={lift.key} style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "10px", border: "1px solid #1f2937" }}>
+            {lift.tiered && (
+              <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
+                {["beginner", "intermediate", "advanced"].map(t => (
+                  <button key={t} onClick={() => setSelectedTier(st => ({ ...st, [lift.key]: t }))} style={{
+                    flex: 1, padding: "6px 4px", borderRadius: "6px", fontSize: "11px", fontWeight: "700",
+                    border: (selectedTier[lift.key] || "intermediate") === t ? "1px solid #38bdf8" : "1px solid #374151",
+                    background: (selectedTier[lift.key] || "intermediate") === t ? "#38bdf822" : "transparent",
+                    color: (selectedTier[lift.key] || "intermediate") === t ? "#38bdf8" : "#6b7280", cursor: "pointer",
+                  }}>
+                    {t.charAt(0).toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }}>
               <div>
-                <div style={{ color: "#f9fafb", fontSize: "14px", fontWeight: "700" }}>{lift.name}</div>
+                <div style={{ color: "#f9fafb", fontSize: "14px", fontWeight: "700" }}>{displayName}</div>
                 {existing?.date && <div style={{ color: "#6b7280", fontSize: "11px", marginTop: "2px" }}>Last logged: {existing.date}</div>}
               </div>
               {working && (
@@ -2004,7 +2156,7 @@ function MaxTracker({ maxes, onSave }) {
             </div>
             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <input type="number" placeholder={existing?.weight ? `Last: ${existing.weight} lbs` : "5-rep max (lbs)"} value={currentVal}
-                onChange={e => setEditing(ed => ({ ...ed, [lift.key]: e.target.value }))}
+                onChange={e => setEditing(ed => ({ ...ed, [storageKey]: e.target.value }))}
                 style={{ flex: 1, background: "#0d1117", border: "1px solid #374151", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "14px", outline: "none" }} />
               <div style={{ color: "#6b7280", fontSize: "13px" }}>lbs</div>
             </div>
@@ -2026,13 +2178,81 @@ function isLiftStale(rec) {
   return elapsedDays >= 28;
 }
 
+// Your Sunday landing spot for "how did this week actually go." Not a
+// forced redirect - it just sits at the top of the page you already land
+// on every Sunday, so it shows up without shoving you somewhere you
+// weren't headed.
+function WeekRecapCard({ data }) {
+  const weekDates = getWeekDates(new Date());
+  const todayKey = getDateKey(new Date());
+
+  const completedDates = new Set(Object.values(data.sessionLog || {}).map(s => s.dateKey));
+  const liftDaysDone = weekDates.filter(dk => completedDates.has(dk)).length;
+
+  const latestWeight = data.weightLog[data.weightLog.length - 1]?.weight;
+  let nutritionHitDays = 0;
+  weekDates.forEach(dk => {
+    if (dk > todayKey) return; // don't count days that haven't happened yet
+    const entries = data.nutritionLog[dk];
+    if (!entries || !entries.length) return;
+    const totals = sumEntries(entries);
+    const targets = getDietTargets(latestWeight || 200, new Date(dk).getDay() === 0);
+    if (!targets) return;
+    const hits = checkMacroHits(totals, targets);
+    if (hits.calories && hits.protein) nutritionHitDays++;
+  });
+
+  const weekStart = weekDates[0], weekEnd = weekDates[6];
+  const weekWeights = (data.weightLog || []).filter(e => e.iso && e.iso.slice(0, 10) >= weekStart && e.iso.slice(0, 10) <= weekEnd);
+  const weightChange = weekWeights.length >= 2 ? (weekWeights[weekWeights.length - 1].weight - weekWeights[0].weight) : null;
+
+  const xpThisWeek = Object.keys(data.xpLog || {})
+    .filter(k => data.xpLog[k] && weekDates.some(dk => k.includes(dk)))
+    .reduce((sum, k) => sum + xpAmountForReasonKey(k), 0);
+
+  const tileStyle = { background: "#0d1117", borderRadius: "10px", padding: "12px", border: "1px solid #1f2937" };
+
+  return (
+    <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "20px", border: "1px solid #1f2937" }}>
+      <div style={{ color: "#a855f7", fontSize: "10px", letterSpacing: "3px", marginBottom: "12px" }}>THIS WEEK</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+        <div style={tileStyle}>
+          <div style={{ color: "#10b981", fontSize: "20px", fontWeight: "800" }}>{liftDaysDone}/6</div>
+          <div style={{ color: "#6b7280", fontSize: "11px" }}>Lift days done</div>
+        </div>
+        <div style={tileStyle}>
+          <div style={{ color: "#38bdf8", fontSize: "20px", fontWeight: "800" }}>{nutritionHitDays}/7</div>
+          <div style={{ color: "#6b7280", fontSize: "11px" }}>Nutrition on target</div>
+        </div>
+        <div style={tileStyle}>
+          <div style={{ color: weightChange == null ? "#6b7280" : weightChange <= 0 ? "#10b981" : "#f59e0b", fontSize: "20px", fontWeight: "800" }}>
+            {weightChange == null ? "—" : `${weightChange > 0 ? "+" : ""}${weightChange.toFixed(1)}`}
+          </div>
+          <div style={{ color: "#6b7280", fontSize: "11px" }}>Weight change</div>
+        </div>
+        <div style={tileStyle}>
+          <div style={{ color: "#a855f7", fontSize: "20px", fontWeight: "800" }}>{xpThisWeek}</div>
+          <div style={{ color: "#6b7280", fontSize: "11px" }}>XP earned</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FlexDayPage({ data, weights, exerciseHistory, onJumpToDay, onJumpToMaxes, onToggleFlexCheck, onWeightChange, onLogHistory, zones }) {
   const [showAll, setShowAll] = useState(false);
   const dateKey = getDateKey(new Date());
   const weekKey = getWeekKey(new Date());
   const liftDays = days.filter(d => !!d.sections);
   const missedThisWeek = liftDays.filter(d => !!data.missed[`${weekKey}_d${d.id}`]);
-  const staleLifts = compoundLifts.filter(l => isLiftStale(data.maxes[l.key]));
+  function isLiftDueForTesting(lift) {
+    if (!lift.tiered) return isLiftStale(data.maxes[lift.key]);
+    // Tiered lifts: due only if EVERY tier is stale, so testing one variant
+    // (whichever equipment was actually free that day) counts as current.
+    const tiers = ["beginner", "intermediate", "advanced"];
+    return tiers.every(t => isLiftStale(data.maxes[`${lift.key}_${t}`]));
+  }
+  const staleLifts = compoundLifts.filter(isLiftDueForTesting);
   const flexCardioDone = !!data.checks[`${dateKey}_flex_cardio`];
 
   const panelStyle = { borderRadius: "12px", padding: "16px", marginBottom: "16px" };
@@ -2042,6 +2262,8 @@ function FlexDayPage({ data, weights, exerciseHistory, onJumpToDay, onJumpToMaxe
     <div style={{ padding: "20px" }}>
       <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Flex Day</div>
       <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Rest, catch up on a missed day, or knock out max testing. Your call, nothing forced.</div>
+
+      <WeekRecapCard data={data} />
 
       {missedThisWeek.length > 0 ? (
         <div style={{ ...panelStyle, background: "#1e3a5f33", border: "1px solid #38bdf855" }}>
@@ -2107,10 +2329,22 @@ function GymPlanInner() {
   const dateKey = getDateKey(new Date());
   const todayLabel = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
 
+  // update() takes an object patch (same call sites as before, nothing
+  // changes for callers) but merges it against the LATEST state via
+  // React's functional setState form instead of the `data` closure
+  // variable. That closure goes stale the instant a handler calls update()
+  // more than once before a re-render happens - which is exactly what
+  // logging a nutrition entry that also crosses an XP threshold did: the
+  // XP award's own update() call would merge its {xp, xpLog} patch on top
+  // of the OLD data, silently reverting the entry (or checkbox, or Flex
+  // Day toggle) the first update() call had just set. Same root cause hit
+  // workout-day completion and Flex Day completion too, not just nutrition.
   function update(patch) {
-    const updated = { ...data, ...patch };
-    setData(updated);
-    saveData(updated);
+    setData(prev => {
+      const updated = { ...prev, ...patch };
+      saveData(updated);
+      return updated;
+    });
   }
 
   // Persist once on mount so a freshly-defaulted programStartDate (used for
