@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<title>Robert's Gym Plan</title>
+<title>Gym Plan</title>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
@@ -20,9 +20,65 @@
 const { useState, useEffect, useRef, Component } = React;
 
 // ============================================================================
-// ROBERT'S GYM PLAN
+// GYM PLAN
 // ----------------------------------------------------------------------------
 // CHANGELOG
+//
+// v24  (short-term batch: Finisher workouts + XP/leveling overhaul)
+//   - Optional Finisher section on every lift day, including heavy
+//     compound days, deliberately not gated. Pick up to 2 from a
+//     muscle-group-matched pool plus a standing full-body/conditioning
+//     pool that's always available. Cap of 2 is what keeps a great-feeling
+//     day from turning into unlimited bonus volume. Conditioning/metabolic
+//     bodyweight work only, no loaded lifting.
+//   - Leveling reworked to an exponential 1-99 curve. Fast early levels,
+//     meaningfully slower later on, level 99 sits around a decade out at
+//     realistic pace, a genuine long-term milestone.
+//   - XP bar and level-up are louder now: big level number, gradient
+//     card, and a dedicated celebratory toast when you actually level up.
+//   - XP per workout reworked. Old flat 30 XP "day complete" bonus is
+//     replaced by (a) XP per exercise scaled to its real set count, fires
+//     the moment that exercise is checked, so total earned always tracks
+//     actual volume and never goes stale when exercises change, plus
+//     (b) a day-complete bonus layered by type: Push and Pull share the
+//     same standard bonus, Legs gets a meaningfully higher one, an
+//     intentional reward for the day nobody wants to do.
+//   - Random positive affirmation now rides along with the day-complete
+//     XP award instead of a flat "day complete" label.
+//   - Finisher exercises award a small XP bonus each when checked off.
+//
+// v23
+//   - Removed the two spots where exercise content referenced personal
+//     backstory (Squat warm-up note, Bulgarian Split Squat's last howto
+//     step) so the app content reads as generic guidance, not tailored
+//     narration. Everything else was already generic.
+//   - Bulgarian Split Squat now marked as a per-side exercise: "each side"
+//     shows next to the sets/reps line, and the howto text spells out
+//     completing all reps on one leg before switching. 4 sets x 6-8 reps
+//     means 4 sets per leg, 8 sets total, standard convention for any
+//     single-leg movement.
+//
+// v22
+//   - Renamed the app to just "Gym Plan," dropped "Robert's" from the
+//     header eyebrow and the page title.
+//   - Notes weren't actually being lost. Checked the code: weight and
+//     notes are stored together in the same object and both persist
+//     identically, there was no path that could drop one but not the
+//     other. The real problem was visibility - a saved note was never
+//     shown anywhere except inside the expanded card, so it read as
+//     gone. Fixed by: showing the note on the collapsed card (matching
+//     the badge weight already gets), labeling the notes box "carried
+//     over from last time" when it's pre-filled with a saved note, and
+//     showing notes on the last-3-sessions trend chips too.
+//
+// v21
+//   - Flex Day always shows a "Go to 5RM tracker" quick action now,
+//     regardless of which suggestion panel is showing. Previously a
+//     missed-day makeup suggestion hid the max-testing option entirely,
+//     so testing your 5RM on a free Sunday only worked if nothing else
+//     needed catching up. If a lift is also overdue for testing while a
+//     makeup day is showing, that's now noted underneath the makeup
+//     suggestion too.
 //
 // v20
 //   - 5RM tab is now tier-aware for the 4 lifts that have equipment
@@ -226,7 +282,7 @@ const { useState, useEffect, useRef, Component } = React;
 // DATA LAYER
 // ============================================================================
 
-const APP_VERSION = "v20";
+const APP_VERSION = "v24";
 
 // Storage key is intentionally NOT tied to APP_VERSION.
 // Bumping the version must never wipe the weight log, 5RMs, or logged weights.
@@ -271,7 +327,7 @@ function loadData() {
     weights: {}, maxes: {}, missed: {}, difficulty: {}, coreSkip: {}, quickCoreLog: {},
     checks: {}, nutritionLog: {}, xp: 0, xpLog: {}, coreMode: {}, customSetsReps: {},
     exerciseHistory: {}, deloadAckWeek: null, programStartDate: new Date().toISOString(),
-    activeSession: null, sessionLog: {}, activityLog: [],
+    activeSession: null, sessionLog: {}, activityLog: [], finisherLog: {},
     profile: { age: 31, goalWeight: 180 },
     weightLog: [{ date: "Jul 2025", weight: 206.6 }],
   };
@@ -337,40 +393,77 @@ function ToastStack({ toasts }) {
   return (
     <div style={{ position: "fixed", top: "16px", left: "16px", right: "16px", zIndex: 1000, display: "flex", flexDirection: "column", gap: "8px", pointerEvents: "none" }}>
       {toasts.map(t => (
-        <div key={t.id} style={{
-          background: "#111827", border: `1px solid ${t.color || "#38bdf8"}55`, borderRadius: "12px",
-          padding: "14px 16px", boxShadow: "0 8px 24px rgba(0,0,0,0.4)", animation: "toastIn 0.25s ease-out",
-        }}>
-          <div style={{ color: t.color || "#38bdf8", fontSize: "14px", fontWeight: "800", marginBottom: t.subtitle ? "2px" : "0" }}>{t.title}</div>
-          {t.subtitle && <div style={{ color: "#d1d5db", fontSize: "12px" }}>{t.subtitle}</div>}
-        </div>
+        t.levelUp ? (
+          <div key={t.id} style={{
+            background: "linear-gradient(135deg, #a855f7, #ec4899)", borderRadius: "16px",
+            padding: "18px 20px", boxShadow: "0 12px 32px rgba(168,85,247,0.5)", animation: "levelUpIn 0.4s ease-out",
+            textAlign: "center",
+          }}>
+            <div style={{ fontSize: "28px", marginBottom: "2px" }}>🎉</div>
+            <div style={{ color: "#fff", fontSize: "20px", fontWeight: "900", letterSpacing: "-0.5px" }}>LEVEL UP!</div>
+            <div style={{ color: "#fff", fontSize: "15px", fontWeight: "700", opacity: 0.95 }}>You're now Level {t.level}</div>
+          </div>
+        ) : (
+          <div key={t.id} style={{
+            background: "#111827", border: `1px solid ${t.color || "#38bdf8"}55`, borderRadius: "12px",
+            padding: "14px 16px", boxShadow: "0 8px 24px rgba(0,0,0,0.4)", animation: "toastIn 0.25s ease-out",
+          }}>
+            <div style={{ color: t.color || "#38bdf8", fontSize: "14px", fontWeight: "800", marginBottom: t.subtitle ? "2px" : "0" }}>{t.title}</div>
+            {t.subtitle && <div style={{ color: "#d1d5db", fontSize: "12px" }}>{t.subtitle}</div>}
+          </div>
+        )
       ))}
-      <style>{`@keyframes toastIn { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+      <style>{`
+        @keyframes toastIn { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes levelUpIn { 0% { opacity: 0; transform: translateY(-12px) scale(0.9); } 60% { transform: translateY(2px) scale(1.03); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+      `}</style>
     </div>
   );
 }
 
 function XPBar({ xp }) {
-  const { level, into, needed, pct } = getLevelInfo(xp);
+  const { level, into, needed, pct, maxed } = getLevelInfo(xp);
   return (
-    <div style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "20px", border: "1px solid #1f2937" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-        <div style={{ color: "#a855f7", fontSize: "10px", letterSpacing: "3px" }}>LEVEL {level}</div>
-        <div style={{ color: "#6b7280", fontSize: "11px" }}>{into} / {needed} XP</div>
+    <div style={{ background: "linear-gradient(135deg, #1a0b2e, #111827)", borderRadius: "14px", padding: "18px", marginBottom: "20px", border: "1px solid #a855f755" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: "10px" }}>
+        <div>
+          <div style={{ color: "#a855f7", fontSize: "10px", letterSpacing: "3px", marginBottom: "2px" }}>{maxed ? "MAX LEVEL" : "LEVEL"}</div>
+          <div style={{ color: "#fff", fontSize: "40px", fontWeight: "900", letterSpacing: "-1.5px", lineHeight: 1 }}>{level}</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ color: "#d1d5db", fontSize: "13px", fontWeight: "700" }}>{into.toLocaleString()} / {needed.toLocaleString()}</div>
+          <div style={{ color: "#6b7280", fontSize: "10px" }}>XP to next level</div>
+        </div>
       </div>
-      <div style={{ background: "#0d1117", borderRadius: "999px", height: "10px", overflow: "hidden" }}>
-        <div style={{ background: "linear-gradient(90deg, #a855f7, #ec4899)", height: "100%", width: `${pct}%`, borderRadius: "999px", transition: "width 0.3s" }} />
+      <div style={{ background: "#0d1117", borderRadius: "999px", height: "12px", overflow: "hidden" }}>
+        <div style={{ background: "linear-gradient(90deg, #a855f7, #ec4899)", height: "100%", width: `${pct}%`, borderRadius: "999px", transition: "width 0.4s" }} />
       </div>
-      <div style={{ color: "#4b5563", fontSize: "10px", marginTop: "6px" }}>{xp} total XP earned</div>
+      <div style={{ color: "#4b5563", fontSize: "10px", marginTop: "8px" }}>{xp.toLocaleString()} total XP earned</div>
     </div>
   );
 }
 
+// Exponential 1-99 curve: fast early levels (level 10 in a session or two),
+// meaningfully slower later on. Level 99 sits around 10 years at Robert's
+// realistic weekly pace, a genuine long-term milestone rather than
+// something that just falls out of normal use, same spirit as an OSRS 99.
+function xpForLevelThreshold(level) {
+  return Math.round(25 * Math.pow(1.072, level));
+}
+const MAX_LEVEL = 99;
 function getLevelInfo(xp) {
-  const perLevel = 100;
-  const level = Math.floor(xp / perLevel) + 1;
-  const into = xp % perLevel;
-  return { level, into, needed: perLevel, pct: Math.round((into / perLevel) * 100) };
+  let level = 1;
+  let remaining = xp;
+  while (level < MAX_LEVEL) {
+    const need = xpForLevelThreshold(level + 1);
+    if (remaining < need) break;
+    remaining -= need;
+    level++;
+  }
+  const needed = xpForLevelThreshold(Math.min(level + 1, MAX_LEVEL));
+  const maxed = level >= MAX_LEVEL;
+  const pct = maxed ? 100 : Math.round((remaining / needed) * 100);
+  return { level, into: remaining, needed, pct, maxed };
 }
 
 // MET values for standalone cardio logging. Lifting keeps its own fixed
@@ -693,7 +786,7 @@ const days = [
   },
   {
     id: 3, label: "Wed", title: "Legs A · Quads", stretchKey: "legsA",
-    note: "Warm up first: an empty-bar or bodyweight set, then one light-medium set, before jumping to working weight. Especially on Squat since you're just getting back into it.",
+    note: "Warm up first: an empty-bar or bodyweight set, then one light-medium set, before jumping to working weight. Especially important on Squat.",
     sections: [
       {
         name: "QUADS", color: "#06b6d4",
@@ -701,7 +794,7 @@ const days = [
           {
             name: "Squat", sets: 4, reps: "6-8", muscles: ["Quads", "Glutes", "Hamstrings", "Core"], restType: "compound", maxKey: "squat",
             tiers: {
-              beginner: { name: "Bulgarian Split Squat", equipment: "Dumbbells + Bench (back foot elevated)", howto: ["Stand a few feet in front of a bench, rest one foot behind you on it.", "Hold dumbbells at your sides or bodyweight only to start.", "Lower your back knee toward the floor.", "Front knee stays over your ankle.", "Drive through your front heel to stand. This is your starting tier since you haven't squatted in years."] },
+              beginner: { name: "Bulgarian Split Squat", equipment: "Dumbbells + Bench (back foot elevated)", unilateral: true, howto: ["Stand a few feet in front of a bench, rest one foot behind you on it.", "Hold dumbbells at your sides or bodyweight only to start.", "Lower your back knee toward the floor.", "Front knee stays over your ankle.", "Drive through your front heel to stand. Complete all reps, then switch legs and repeat."] },
               intermediate: { name: "Goblet Squat", equipment: "Dumbbells", howto: ["Hold one dumbbell vertically at your chest with both hands.", "Feet shoulder width, toes slightly out.", "Squat down keeping your chest tall and elbows inside your knees.", "Drive through your heels to stand.", "Move here once Bulgarian split squats feel fully controlled, 1-2 weeks."] },
               advanced: { name: "Barbell Back Squat", equipment: "Squat rack + barbell", howto: ["Set the bar at shoulder height on the rack.", "Step under the bar, rest it across your upper back, not your neck.", "Feet shoulder width, toes slightly out.", "Unrack, step back, squat until thighs are parallel to the floor.", "Drive through your heels to stand. Keep your chest up throughout."] },
             }
@@ -785,6 +878,72 @@ const coreFinisherExercises = [
   { name: "Cable Woodchop", sets: 3, detail: "12 reps each side", muscles: ["Obliques", "Core"], restType: "core", howto: ["Set the pulley high, attach a single handle.", "Stand sideways to the tower, feet shoulder width.", "Pull the handle down and across your body in one motion, rotating through your torso.", "Control the return back up to the start.", "Finish all reps one side before switching."] },
   { name: "Side Plank Reach-Unders", sets: 3, detail: "10 reps each side", muscles: ["Obliques", "Core"], restType: "core", howto: ["Set up in a side plank, forearm down, hips lifted.", "Reach your top arm up toward the ceiling.", "Rotate your torso down, threading your arm under your body.", "Return to the reaching position.", "Keep hips lifted the entire time, don't let them drop."] },
 ];
+
+// Optional, capped at 2 picks, conditioning/metabolic work only, never
+// loaded lifting. Available on every day including heavy compound days,
+// deliberately not gated, since the point is "I've got more left today,"
+// which can happen on any day. The 2-pick cap is what keeps a great-feeling
+// day from turning into unlimited bonus volume, not a day restriction.
+const finisherExercises = {
+  push: [
+    { name: "Push-Up Burnout", sets: 1, detail: "Max reps, good form", muscles: ["Chest", "Triceps", "Front Shoulders"], restType: "core", howto: ["Set up in a strong plank, hands under shoulders.", "Lower your chest to just above the floor.", "Press back up to full extension.", "Go until form breaks down, not just until it's hard.", "Stop the set the moment your hips sag or your range shortens."] },
+    { name: "Plank Shoulder Taps", sets: 3, detail: "16 taps (8 each side)", muscles: ["Shoulders", "Core"], restType: "core", howto: ["Set up in a high plank, hands under shoulders, feet a bit wider than usual.", "Tap your left hand to your right shoulder.", "Return it to the floor.", "Tap your right hand to your left shoulder.", "Keep your hips as still as possible, don't let them rock side to side."] },
+    { name: "Bench Dips", sets: 3, detail: "12-15 reps", muscles: ["Triceps", "Front Shoulders"], restType: "core", howto: ["Sit on the edge of a bench, hands gripping the edge beside your hips.", "Walk your feet out, legs mostly straight.", "Lower your body by bending your elbows until they hit about 90 degrees.", "Press back up to full extension.", "Keep your shoulders down away from your ears."] },
+  ],
+  pull: [
+    { name: "Superman Hold", sets: 3, detail: "20-30 sec hold", muscles: ["Lower Back", "Upper Back"], restType: "core", howto: ["Lie face down, arms extended overhead.", "Lift your arms, chest, and legs off the floor at the same time.", "Hold, squeezing your lower and upper back.", "Keep your neck neutral, don't crane it up.", "Lower with control between sets."] },
+    { name: "Cable Face Pull Burnout", sets: 1, detail: "Max reps, light weight", muscles: ["Rear Delts", "Upper Back"], restType: "core", howto: ["Set the pulley to face height, light weight, attach the rope.", "Pull the rope toward your face, hands splitting apart.", "Squeeze your rear delts hard at the end range.", "Return slowly, stay controlled even as it burns.", "Go until you can't hit full range with good form."] },
+    { name: "Renegade Rows", sets: 3, detail: "10 reps each side", muscles: ["Upper Back", "Core"], restType: "core", howto: ["Set up in a plank holding light dumbbells, feet wide for stability.", "Row one dumbbell up to your hip, elbow close to your body.", "Lower it back down with control.", "Keep your hips square, resist the urge to rotate.", "Alternate sides for the full set."] },
+  ],
+  legs: [
+    { name: "Bodyweight Squat Pulses", sets: 3, detail: "20-30 sec", muscles: ["Quads", "Glutes"], restType: "core", howto: ["Lower into a squat about halfway down.", "Stay there and pulse up and down a few inches.", "Keep your chest up and knees tracking over your toes.", "Don't stand all the way up between pulses.", "Hold the burn for the full time."] },
+    { name: "Jump Squats", sets: 3, detail: "10-12 reps", muscles: ["Quads", "Glutes", "Hamstrings"], restType: "core", howto: ["Stand with feet shoulder width.", "Drop into a quarter squat, then explode straight up.", "Land soft, bending your knees to absorb it.", "Reset your stance before the next rep.", "Quality over speed, a sloppy landing isn't worth the extra rep."] },
+    { name: "Wall Sit Hold", sets: 3, detail: "30-45 sec hold", muscles: ["Quads", "Glutes"], restType: "core", howto: ["Back against a wall, slide down until thighs are parallel to the floor.", "Knees at roughly 90 degrees, directly over your ankles.", "Hold, arms relaxed at your sides.", "Keep your lower back pressed against the wall.", "Breathe steady, don't hold your breath through the burn."] },
+  ],
+  full: [
+    { name: "Burpees", sets: 3, detail: "8-10 reps", muscles: ["Full Body"], restType: "core", howto: ["Start standing, drop into a squat, hands on the floor.", "Kick your feet back into a plank.", "Do a push-up, or skip it if you need to keep moving.", "Jump your feet back up to your hands.", "Explode up into a jump to finish the rep."] },
+    { name: "Mountain Climbers", sets: 3, detail: "30-40 sec", muscles: ["Full Body", "Core"], restType: "core", howto: ["Set up in a high plank.", "Drive one knee toward your chest, then switch, like running in place.", "Keep your hips low and your core tight the whole time.", "Move fast but stay controlled, don't let your form collapse.", "Keep breathing, don't hold it through the burn."] },
+    { name: "High Knees", sets: 3, detail: "30-40 sec", muscles: ["Full Body"], restType: "core", howto: ["Stand tall, jog in place.", "Drive your knees up toward waist height each step.", "Pump your arms to match the pace.", "Stay light on your feet, land on the balls of your feet.", "Keep the pace up for the full time."] },
+    { name: "Plank Jacks", sets: 3, detail: "20-30 reps", muscles: ["Full Body", "Core"], restType: "core", howto: ["Set up in a high plank.", "Jump your feet out wide, like a jumping jack.", "Jump them back together.", "Keep your hips level the whole time, don't let them bounce up and down.", "Stay light and controlled with each landing."] },
+  ],
+};
+
+// Maps a day title prefix to its finisher pool category. "full" is not
+// listed here since it's always shown regardless of which day it is.
+function finisherCategoryForDay(dayTitle) {
+  if (dayTitle.startsWith("Push")) return "push";
+  if (dayTitle.startsWith("Pull")) return "pull";
+  if (dayTitle.startsWith("Legs")) return "legs";
+  return null;
+}
+
+const workoutAffirmations = [
+  "Nice lift today, you gave it your all!",
+  "That's real work in the books. Well done.",
+  "Consistency like this is what actually moves the needle.",
+  "Strong session. Your future self says thanks.",
+  "You showed up and put in the work. That matters.",
+  "Another one down. This is how progress gets made.",
+  "Solid effort today, keep stacking days like this.",
+  "You didn't skip it. That's the whole game.",
+];
+
+// XP constants. Per-set XP means total earned always tracks real volume
+// done, not a guessed flat number that goes stale when exercises change.
+// The day-complete bonus is where Legs gets its intentional premium.
+const PER_SET_XP = 3;
+const STANDARD_DAY_XP_BONUS = 15; // Push and Pull, equal footing
+const LEGS_XP_BONUS = 30;         // meaningfully higher, least-liked day
+const FINISHER_XP = 10;
+
+function findExerciseInDay(dayDef, exerciseName) {
+  if (!dayDef || !dayDef.sections) return null;
+  for (const s of dayDef.sections) {
+    const ex = s.exercises.find(e => e.name === exerciseName);
+    if (ex) return ex;
+  }
+  return null;
+}
 
 const muscleColors = {
   "Chest": "#3b82f6", "Upper Chest": "#60a5fa", "Lower Chest": "#93c5fd", "Mid Chest": "#3b82f6", "Triceps": "#ef4444",
@@ -915,15 +1074,25 @@ function WeightLogger({ exerciseKey, weights, maxKey, maxes, history, onChange, 
       {recent.length > 0 && (
         <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px" }}>
           {recent.map((r, i) => (
-            <div key={i} style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: "6px", padding: "4px 8px" }}>
-              <span style={{ color: "#4b5563", fontSize: "10px" }}>{r.date}</span>
-              <span style={{ color: "#9ca3af", fontSize: "11px", fontWeight: "700", marginLeft: "5px" }}>{r.weight}</span>
+            <div key={i} style={{ background: "#111827", border: "1px solid #1f2937", borderRadius: "6px", padding: "4px 8px", maxWidth: "160px" }}>
+              <div>
+                <span style={{ color: "#4b5563", fontSize: "10px" }}>{r.date}</span>
+                <span style={{ color: "#9ca3af", fontSize: "11px", fontWeight: "700", marginLeft: "5px" }}>{r.weight}</span>
+              </div>
+              {r.notes && <div style={{ color: "#6b7280", fontSize: "10px", marginTop: "2px", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>"{r.notes}"</div>}
             </div>
           ))}
         </div>
       )}
       <input type="text" placeholder="Weight used (e.g. 135 lbs)" value={localWeight} onChange={e => setLocalWeight(e.target.value)}
         style={{ width: "100%", background: "#111827", border: "1px solid #374151", borderRadius: "6px", padding: "8px 10px", color: "#f9fafb", fontSize: "13px", outline: "none", boxSizing: "border-box", marginBottom: "8px" }} />
+      {/* Label makes it explicit this box already holds what you wrote last
+          time, not a blank field - the note itself was always saved
+          correctly, it just wasn't visible anywhere until you opened this
+          exact card, which read as it having vanished. */}
+      <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "1px", marginBottom: "4px" }}>
+        {d.notes ? "NOTES · CARRIED OVER FROM LAST TIME, EDIT AS NEEDED" : "NOTES"}
+      </div>
       <textarea placeholder="Notes (felt easy, increase next time, etc.)" value={localNotes} onChange={e => setLocalNotes(e.target.value)} rows={2}
         style={{ width: "100%", background: "#111827", border: "1px solid #374151", borderRadius: "6px", padding: "8px 10px", color: "#9ca3af", fontSize: "12px", outline: "none", resize: "none", boxSizing: "border-box", marginBottom: "8px" }} />
       <button onClick={handleSave} style={{ width: "100%", background: saved ? "#10b981" : "#1f2937", color: saved ? "#030712" : "#9ca3af", border: "none", borderRadius: "6px", padding: "10px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>
@@ -993,7 +1162,12 @@ function ExerciseCard({ exercise, sectionColor, dayId, weights, maxes, difficult
             {working && !hasWeight && <span style={{ background: "#10b98115", color: "#10b981", fontSize: "10px", fontWeight: "700", padding: "2px 7px", borderRadius: "4px" }}>Target: {working} lbs</span>}
           </div>
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "5px" }}>{exercise.muscles.map(m => <MuscleTag key={m} muscle={m} />)}</div>
-          <div style={{ color: "#6b7280", fontSize: "12px" }}>{displaySets} sets x {displayReps} reps <span style={{ marginLeft: "8px", color: "#4b5563" }}>· {active.equipment}</span>{setsRepsOverride && <span style={{ marginLeft: "8px", color: "#38bdf8", fontSize: "10px" }}>custom</span>}</div>
+          {weights[exerciseKey]?.notes && (
+            <div style={{ color: "#6b7280", fontSize: "11px", fontStyle: "italic", marginBottom: "5px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "260px" }}>
+              💬 "{weights[exerciseKey].notes}"
+            </div>
+          )}
+          <div style={{ color: "#6b7280", fontSize: "12px" }}>{displaySets} sets x {displayReps} reps{active.unilateral && <span style={{ color: "#38bdf8" }}> · each side</span>} <span style={{ marginLeft: "8px", color: "#4b5563" }}>· {active.equipment}</span>{setsRepsOverride && <span style={{ marginLeft: "8px", color: "#38bdf8", fontSize: "10px" }}>custom</span>}</div>
         </div>
         <div style={{ color: sectionColor, fontSize: "20px", marginLeft: "12px", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>›</div>
         </div>
@@ -1040,6 +1214,11 @@ function CoreCard({ exercise, dayId, weights, exerciseHistory, onWeightChange, o
           <div style={{ flex: 1 }}>
             <div style={{ color: checked ? "#9ca3af" : "#f9fafb", fontSize: "15px", fontWeight: "700", marginBottom: "5px", textDecoration: checked ? "line-through" : "none" }}>{exercise.name}</div>
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "5px" }}>{exercise.muscles.map(m => <MuscleTag key={m} muscle={m} />)}</div>
+            {weights[key]?.notes && (
+              <div style={{ color: "#6b7280", fontSize: "11px", fontStyle: "italic", marginBottom: "5px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "260px" }}>
+                💬 "{weights[key].notes}"
+              </div>
+            )}
             <div style={{ color: "#6b7280", fontSize: "12px" }}>{exercise.sets} sets · {exercise.detail}</div>
           </div>
           <div style={{ color: accent, fontSize: "20px", marginLeft: "12px", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>›</div>
@@ -1057,6 +1236,79 @@ function CoreCard({ exercise, dayId, weights, exerciseHistory, onWeightChange, o
           <RestTimer restType={exercise.restType} />
           <WeightLogger exerciseKey={key} weights={weights} maxKey={null} maxes={{}} history={exerciseHistory[key]} onChange={onWeightChange} onLog={onLogHistory} />
         </div>
+      )}
+    </div>
+  );
+}
+
+// Selection UI capped at 2 picks. Shows the muscle-group pool matching
+// whatever day this is, plus the standing full-body pool that's always
+// available regardless of day, for when the good feeling isn't localized
+// to one muscle group.
+function FinisherSection({ dayId, dayTitle, dateKey, selected, checks, weights, exerciseHistory, onToggleSelect, onToggleCheck, onWeightChange, onLogHistory }) {
+  const category = finisherCategoryForDay(dayTitle);
+  const categoryPool = category ? finisherExercises[category] : [];
+  const fullPool = finisherExercises.full;
+  const atCap = selected.length >= 2;
+
+  function isSelected(name) { return selected.includes(name); }
+  function findExercise(name) {
+    return [...categoryPool, ...fullPool].find(e => e.name === name);
+  }
+
+  const rowStyle = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 4px", cursor: "pointer", borderBottom: "1px solid #1f2937" };
+
+  return (
+    <div style={{ marginBottom: "24px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "4px" }}>
+        <div style={{ width: "3px", height: "18px", background: "#facc15", borderRadius: "2px" }} />
+        <div style={{ color: "#facc15", fontSize: "11px", letterSpacing: "3px", fontWeight: "700" }}>FINISHER</div>
+      </div>
+      <div style={{ color: "#6b7280", fontSize: "12px", marginBottom: "12px" }}>Pick up to 2 to finish strong. Optional, doesn't count against your day.</div>
+
+      {selected.map(name => {
+        const ex = findExercise(name);
+        if (!ex) return null;
+        const checkKey = `${dateKey}_d${dayId}_finisher_${name.replace(/\s+/g, "_")}`;
+        return (
+          <div key={name} style={{ marginBottom: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <div onClick={() => onToggleSelect(name)} style={{ color: "#6b7280", fontSize: "11px", cursor: "pointer", padding: "2px 4px 6px", textDecoration: "underline", textDecorationStyle: "dotted" }}>Remove</div>
+            </div>
+            <CoreCard exercise={ex} dayId={dayId} keyPrefix="finisher" colorOverride="#facc15" weights={weights} exerciseHistory={exerciseHistory} onWeightChange={onWeightChange} onLogHistory={onLogHistory} checked={!!checks[checkKey]} onToggleCheck={() => onToggleCheck(name)} />
+          </div>
+        );
+      })}
+
+      {!atCap ? (
+        <div style={{ background: "#111827", borderRadius: "12px", padding: "8px 12px", border: "1px solid #1f2937" }}>
+          {category && categoryPool.some(e => !isSelected(e.name)) && (
+            <>
+              <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "2px", margin: "8px 0" }}>{category.toUpperCase()} FOCUSED</div>
+              {categoryPool.filter(e => !isSelected(e.name)).map(e => (
+                <div key={e.name} onClick={() => onToggleSelect(e.name)} style={rowStyle}>
+                  <div>
+                    <div style={{ color: "#d1d5db", fontSize: "13px", fontWeight: "600" }}>{e.name}</div>
+                    <div style={{ color: "#6b7280", fontSize: "11px" }}>{e.sets} sets · {e.detail}</div>
+                  </div>
+                  <div style={{ color: "#facc15", fontSize: "18px" }}>+</div>
+                </div>
+              ))}
+            </>
+          )}
+          <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "2px", margin: "12px 0 8px" }}>FULL BODY / CONDITIONING</div>
+          {fullPool.filter(e => !isSelected(e.name)).map((e, i, arr) => (
+            <div key={e.name} onClick={() => onToggleSelect(e.name)} style={i === arr.length - 1 ? { ...rowStyle, borderBottom: "none" } : rowStyle}>
+              <div>
+                <div style={{ color: "#d1d5db", fontSize: "13px", fontWeight: "600" }}>{e.name}</div>
+                <div style={{ color: "#6b7280", fontSize: "11px" }}>{e.sets} sets · {e.detail}</div>
+              </div>
+              <div style={{ color: "#facc15", fontSize: "18px" }}>+</div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ color: "#4b5563", fontSize: "11px", textAlign: "center", padding: "4px 0" }}>Cap reached, 2 for today. Remove one above to swap.</div>
       )}
     </div>
   );
@@ -2274,6 +2526,11 @@ function FlexDayPage({ data, weights, exerciseHistory, onJumpToDay, onJumpToMaxe
           {missedThisWeek.map(d => (
             <button key={d.id} onClick={() => onJumpToDay(d.id)} style={btnStyle}>Do {d.title} →</button>
           ))}
+          {staleLifts.length > 0 && (
+            <div style={{ color: "#9ca3af", fontSize: "12px", marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #38bdf833" }}>
+              {staleLifts.map(l => l.name).join(", ")} {staleLifts.length === 1 ? "is" : "are"} also overdue for testing, if you'd rather do that instead.
+            </div>
+          )}
         </div>
       ) : staleLifts.length > 0 ? (
         <div style={{ ...panelStyle, background: "#78350f22", border: "1px solid #f59e0b55" }}>
@@ -2289,6 +2546,14 @@ function FlexDayPage({ data, weights, exerciseHistory, onJumpToDay, onJumpToMaxe
           <div style={{ color: "#f9fafb", fontSize: "14px", lineHeight: "1.5", marginBottom: "4px" }}>Nothing missed, no maxes overdue. True rest is fine today. If you want to move, here's a light optional session.</div>
         </div>
       )}
+
+      {/* Always available regardless of which suggestion above is showing.
+          A missed day used to hide this entirely, so testing your 5RM on a
+          free Sunday only worked if nothing else needed catching up. */}
+      <button onClick={onJumpToMaxes} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "#111827", color: "#f9fafb", border: "1px solid #1f2937", borderRadius: "10px", padding: "12px 14px", fontSize: "13px", fontWeight: "700", cursor: "pointer", marginBottom: "16px" }}>
+        <span>Go to 5RM tracker</span>
+        <span style={{ color: "#6b7280" }}>→</span>
+      </button>
 
       {missedThisWeek.length === 0 && staleLifts.length === 0 && (
         <div style={{ marginBottom: "24px" }}>
@@ -2353,10 +2618,10 @@ function GymPlanInner() {
   useEffect(() => { saveData(data); }, []);
 
   const [toasts, setToasts] = useState([]);
-  function pushToast(title, subtitle, color) {
+  function pushToast(title, subtitle, color, extra) {
     const id = Date.now() + Math.random();
-    setToasts(t => [...t, { id, title, subtitle, color }]);
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3500);
+    setToasts(t => [...t, { id, title, subtitle, color, ...(extra || {}) }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), extra?.levelUp ? 4500 : 3500);
   }
 
   // Pure helper: given current xp/xpLog, try to award once per reasonKey.
@@ -2368,11 +2633,14 @@ function GymPlanInner() {
 
   // Applies a list of {reasonKey, amount, label, color} awards as ONE combined
   // state update, so multiple simultaneous awards (e.g. hitting all 4 macros
-  // at once) stack correctly instead of clobbering each other.
+  // at once) stack correctly instead of clobbering each other. Also detects
+  // a level-up crossing and fires one celebratory toast for it, using the
+  // final level reached if the XP burst crossed more than one level at once.
   function applyXpAwards(awards) {
     let xp = data.xp;
     let xpLog = data.xpLog;
     const toastQueue = [];
+    const levelBefore = getLevelInfo(data.xp).level;
     for (const a of awards) {
       const result = tryAwardXp(xp, xpLog, a.reasonKey, a.amount);
       xp = result.xp;
@@ -2382,6 +2650,10 @@ function GymPlanInner() {
     if (toastQueue.length) {
       update({ xp, xpLog });
       toastQueue.forEach(a => pushToast(`+${a.amount} XP`, a.label, a.color));
+      const levelAfter = getLevelInfo(xp).level;
+      if (levelAfter > levelBefore) {
+        pushToast(null, null, null, { levelUp: true, level: levelAfter });
+      }
     }
   }
 
@@ -2468,55 +2740,101 @@ function GymPlanInner() {
     if (wasChecked) delete updated[key]; else updated[key] = true;
     update({ checks: updated });
 
-    if (!wasChecked) {
+    if (wasChecked) return; // unchecking never awards XP
+
+    // All XP for this single interaction gets collected into one array and
+    // applied with ONE applyXpAwards call at the end. Calling it more than
+    // once in the same handler would have each call compute its starting
+    // xp from the same stale render-time `data.xp`, so the second call
+    // would silently clobber the first instead of adding to it, the same
+    // class of bug fixed in v18, just one level up.
+    const awards = [];
+    const dayDef = days.find(d => d.id === dayId);
+
+    if (kind === "lift" && dayDef) {
+      const ex = findExerciseInDay(dayDef, exerciseName);
+      if (ex && ex.sets) {
+        awards.push({ reasonKey: `xp_exset_${dateKey}_d${dayId}_${exerciseName.replace(/\s+/g, "_")}`, amount: ex.sets * PER_SET_XP, label: `${exerciseName} logged`, color: "#38bdf8" });
+      }
+    }
+
+    if (dayDef && dayDef.sections) {
       // Just checked this one, see if that completes the whole day
       // (lift exercises + core, unless skipped, + cardio all need to be checked)
-      const dayDef = days.find(d => d.id === dayId);
-      if (dayDef && dayDef.sections) {
-        const liftNames = dayDef.sections.flatMap(s => s.exercises.map(e => e.name));
-        const coreSkipped = !!data.coreSkip[`${dateKey}_d${dayId}`];
-        const coreModeVal = data.coreMode[`${dateKey}_d${dayId}`] || "regular";
-        const coreNames = coreSkipped ? [] : (coreModeVal === "full" ? coreExercisesFull : coreExercisesRegular).map(e => e.name);
-        const finisherNames = dayDef.coreFinisher ? coreFinisherExercises.map(e => e.name) : [];
+      const liftNames = dayDef.sections.flatMap(s => s.exercises.map(e => e.name));
+      const coreSkipped = !!data.coreSkip[`${dateKey}_d${dayId}`];
+      const coreModeVal = data.coreMode[`${dateKey}_d${dayId}`] || "regular";
+      const coreNames = coreSkipped ? [] : (coreModeVal === "full" ? coreExercisesFull : coreExercisesRegular).map(e => e.name);
+      const finisherNames = dayDef.coreFinisher ? coreFinisherExercises.map(e => e.name) : [];
 
-        const requiredKeys = [
-          ...liftNames.map(n => buildCheckKey(dateKey, dayId, "lift", n)),
-          ...coreNames.map(n => buildCheckKey(dateKey, dayId, "core", n)),
-          ...finisherNames.map(n => buildCheckKey(dateKey, dayId, "corefinisher", n)),
-          buildCheckKey(dateKey, dayId, "cardio", null),
-        ];
-        const allChecked = requiredKeys.every(k => updated[k]);
-        if (allChecked) {
-          const weight = data.weightLog[data.weightLog.length - 1]?.weight;
-          const session = data.activeSession;
-          const usingRealTime = session && session.dateKey === dateKey && session.dayId === dayId;
+      const requiredKeys = [
+        ...liftNames.map(n => buildCheckKey(dateKey, dayId, "lift", n)),
+        ...coreNames.map(n => buildCheckKey(dateKey, dayId, "core", n)),
+        ...finisherNames.map(n => buildCheckKey(dateKey, dayId, "corefinisher", n)),
+        buildCheckKey(dateKey, dayId, "cardio", null),
+      ];
+      const allChecked = requiredKeys.every(k => updated[k]);
+      if (allChecked) {
+        const weight = data.weightLog[data.weightLog.length - 1]?.weight;
+        const session = data.activeSession;
+        const usingRealTime = session && session.dateKey === dateKey && session.dayId === dayId;
 
-          let durationMin = null;
-          let cals;
-          if (usingRealTime) {
-            const start = new Date(session.start);
-            const end = new Date();
-            durationMin = Math.max(1, Math.round((end - start) / 60000));
-            cals = estimateCaloriesBurned(weight, durationMin / 60);
-          } else {
-            cals = estimateCaloriesBurned(weight);
-          }
-
-          const sessionKey = `${dateKey}_d${dayId}`;
-          const newSessionLog = {
-            ...data.sessionLog,
-            [sessionKey]: { dateKey, dayId, dayTitle: dayLabel, durationMin, calories: cals, loggedAt: new Date().toISOString() },
-          };
-          update({ sessionLog: newSessionLog, activeSession: null });
-
-          pushToast(
-            `Workout complete! 🔥`,
-            durationMin ? `${durationMin} min · ~${cals} calories burned` : `~${cals} calories burned (estimate)`,
-            "#10b981"
-          );
-          applyXpAwards([{ reasonKey: `xp_workout_${dateKey}_d${dayId}`, amount: 30, label: `${dayLabel} complete`, color: "#10b981" }]);
+        let durationMin = null;
+        let cals;
+        if (usingRealTime) {
+          const start = new Date(session.start);
+          const end = new Date();
+          durationMin = Math.max(1, Math.round((end - start) / 60000));
+          cals = estimateCaloriesBurned(weight, durationMin / 60);
+        } else {
+          cals = estimateCaloriesBurned(weight);
         }
+
+        const sessionKey = `${dateKey}_d${dayId}`;
+        const newSessionLog = {
+          ...data.sessionLog,
+          [sessionKey]: { dateKey, dayId, dayTitle: dayLabel, durationMin, calories: cals, loggedAt: new Date().toISOString() },
+        };
+        update({ sessionLog: newSessionLog, activeSession: null });
+
+        pushToast(
+          `Workout complete! 🔥`,
+          durationMin ? `${durationMin} min · ~${cals} calories burned` : `~${cals} calories burned (estimate)`,
+          "#10b981"
+        );
+
+        const affirmation = workoutAffirmations[Math.floor(Math.random() * workoutAffirmations.length)];
+        const dayBonus = dayDef.title.startsWith("Legs") ? LEGS_XP_BONUS : STANDARD_DAY_XP_BONUS;
+        awards.push({ reasonKey: `xp_workout_${dateKey}_d${dayId}`, amount: dayBonus, label: affirmation, color: "#10b981" });
       }
+    }
+
+    if (awards.length) applyXpAwards(awards);
+  }
+
+  function handleFinisherSelect(dayId, name) {
+    const dateKey = getDateKey(new Date());
+    const logKey = `${dateKey}_d${dayId}`;
+    const current = data.finisherLog[logKey] || [];
+    let updatedList;
+    if (current.includes(name)) {
+      updatedList = current.filter(n => n !== name);
+    } else {
+      if (current.length >= 2) return; // cap enforced, silently ignore extra taps
+      updatedList = [...current, name];
+    }
+    update({ finisherLog: { ...data.finisherLog, [logKey]: updatedList } });
+  }
+
+  function handleFinisherCheckToggle(dayId, name) {
+    const dateKey = getDateKey(new Date());
+    const checkKey = `${dateKey}_d${dayId}_finisher_${name.replace(/\s+/g, "_")}`;
+    const updatedChecks = { ...data.checks };
+    const wasChecked = !!updatedChecks[checkKey];
+    if (wasChecked) delete updatedChecks[checkKey]; else updatedChecks[checkKey] = true;
+    update({ checks: updatedChecks });
+    if (!wasChecked) {
+      applyXpAwards([{ reasonKey: `xp_finisher_${dateKey}_d${dayId}_${name.replace(/\s+/g, "_")}`, amount: FINISHER_XP, label: `${name} finisher done`, color: "#facc15" }]);
     }
   }
 
@@ -2578,8 +2896,7 @@ function GymPlanInner() {
     <div style={{ minHeight: "100vh", background: "#030712", fontFamily: "'Inter', sans-serif" }}>
       <ToastStack toasts={toasts} />
       <div style={{ background: "#030712", borderBottom: "1px solid #111827", padding: "20px 20px 0" }}>
-        <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "4px", marginBottom: "2px" }}>ROBERT'S</div>
-        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px", marginTop: "6px" }}>
           <div style={{ color: "#f9fafb", fontSize: "24px", fontWeight: "800", letterSpacing: "-0.5px" }}>Gym Plan</div>
           <div style={{ color: "#6b7280", fontSize: "11px", fontWeight: "700", background: "#111827", border: "1px solid #1f2937", borderRadius: "6px", padding: "3px 8px" }}>{APP_VERSION}</div>
           <div style={{ color: "#374151", fontSize: "11px", fontWeight: "600", marginLeft: "auto" }}>{todayLabel}</div>
@@ -2697,6 +3014,20 @@ function GymPlanInner() {
           )}
 
           <CardioBanner zones={zones} dayId={day.id} checked={!!data.checks[`${dateKey}_d${day.id}_cardio`]} onToggleCheck={() => handleCheckToggle(day.id, null, day.title, "cardio")} />
+
+          <FinisherSection
+            dayId={day.id}
+            dayTitle={day.title}
+            dateKey={dateKey}
+            selected={data.finisherLog[`${dateKey}_d${day.id}`] || []}
+            checks={data.checks}
+            weights={data.weights}
+            exerciseHistory={data.exerciseHistory}
+            onToggleSelect={(name) => handleFinisherSelect(day.id, name)}
+            onToggleCheck={(name) => handleFinisherCheckToggle(day.id, name)}
+            onWeightChange={handleWeightChange}
+            onLogHistory={handleLogHistory}
+          />
 
           <div style={{ background: "#0d1117", borderRadius: "12px", padding: "14px 16px", border: "1px solid #1f2937" }}>
             <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "3px", marginBottom: "6px" }}>WEIGHT TIP</div>
