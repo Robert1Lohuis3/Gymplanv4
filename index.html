@@ -24,6 +24,16 @@ const { useState, useEffect, useRef, Component } = React;
 // ----------------------------------------------------------------------------
 // CHANGELOG
 //
+// v27
+//   - New Core tab: full core routine (the Full + Finisher lists) for
+//     days you're not at the gym, no machines needed. Checked off the
+//     same way as gym-day core, awards the same per-exercise + session
+//     XP a full lift day gets.
+//   - 5RM tab now also tracks Core Personal Records: 7 core movements,
+//     logged by reps or hold time instead of weight, same save action as
+//     the lift maxes above it. One list covers gym-day and off-day core,
+//     since it's the same movements either way.
+//
 // v26
 //   - Added an Upper/Lower program alongside Push/Pull/Legs, toggled from
 //     the header. Upper A, Lower A, Upper B, Lower B, continuous session
@@ -311,7 +321,7 @@ const { useState, useEffect, useRef, Component } = React;
 // DATA LAYER
 // ============================================================================
 
-const APP_VERSION = "v26";
+const APP_VERSION = "v27";
 
 // Storage key is intentionally NOT tied to APP_VERSION.
 // Bumping the version must never wipe the weight log, 5RMs, or logged weights.
@@ -367,6 +377,7 @@ function loadData() {
     // resumes UL where IT left off.
     programMode: "ppl",
     ulPointer: 0,
+    coreRecords: {},
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -2568,8 +2579,9 @@ function ProfilePage({ data, onUpdate }) {
   );
 }
 
-function MaxTracker({ maxes, onSave }) {
+function MaxTracker({ maxes, onSave, coreRecords, onSaveCoreRecords }) {
   const [editing, setEditing] = useState({});
+  const [coreEditing, setCoreEditing] = useState({});
   const [saved, setSaved] = useState(false);
   // Which tier is being viewed/edited per tiered lift. Defaults to
   // whichever tier has the most recent loggedAt, so reopening this tab
@@ -2604,6 +2616,15 @@ function MaxTracker({ maxes, onSave }) {
       }
     });
     onSave(updated);
+
+    const nowCore = { ...(coreRecords || {}) };
+    coreTrackList.forEach(item => {
+      if (coreEditing[item.key] !== undefined && coreEditing[item.key] !== "") {
+        nowCore[item.key] = { value: coreEditing[item.key], date: nowLabel, loggedAt: nowIso };
+      }
+    });
+    onSaveCoreRecords(nowCore);
+
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }
@@ -2658,6 +2679,31 @@ function MaxTracker({ maxes, onSave }) {
           </div>
         );
       })}
+
+      <div style={{ color: "#6b7280", fontSize: "10px", letterSpacing: "4px", marginTop: "24px", marginBottom: "4px" }}>ONGOING</div>
+      <div style={{ color: "#f9fafb", fontSize: "18px", fontWeight: "800", marginBottom: "8px" }}>Core Personal Records</div>
+      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "16px" }}>Same idea as the lifts above, but reps or hold time instead of weight. Covers the whole core routine, gym-day or off-day.</div>
+      {coreTrackList.map(item => {
+        const existing = coreRecords?.[item.key];
+        const currentVal = coreEditing[item.key] !== undefined ? coreEditing[item.key] : (existing?.value || "");
+        return (
+          <div key={item.key} style={{ background: "#111827", borderRadius: "12px", padding: "16px", marginBottom: "10px", border: "1px solid #1f2937" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }}>
+              <div>
+                <div style={{ color: "#f9fafb", fontSize: "14px", fontWeight: "700" }}>{item.name}</div>
+                {existing?.date && <div style={{ color: "#6b7280", fontSize: "11px", marginTop: "2px" }}>Last logged: {existing.date}</div>}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <input type="number" placeholder={existing?.value ? `Last: ${existing.value} ${item.unit}` : `Best (${item.unit})`} value={currentVal}
+                onChange={e => setCoreEditing(ed => ({ ...ed, [item.key]: e.target.value }))}
+                style={{ flex: 1, background: "#0d1117", border: "1px solid #374151", borderRadius: "8px", padding: "10px 12px", color: "#f9fafb", fontSize: "14px", outline: "none" }} />
+              <div style={{ color: "#6b7280", fontSize: "13px" }}>{item.unit}</div>
+            </div>
+          </div>
+        );
+      })}
+
       <button onClick={handleSave} style={{ width: "100%", background: saved ? "#10b981" : "#f9fafb", color: saved ? "#fff" : "#030712", border: "none", borderRadius: "12px", padding: "16px", fontSize: "15px", fontWeight: "800", cursor: "pointer", marginTop: "8px" }}>
         {saved ? "Saved" : "Save Max Log"}
       </button>
@@ -2825,6 +2871,59 @@ function FlexDayPage({ data, weights, exerciseHistory, onJumpToDay, onJumpToMaxe
   );
 }
 
+// Deduplicated set of core movements worth tracking as a personal record
+// over time (reps or hold time), separate from the day-to-day checklist.
+// Covers everything in coreExercisesFull and coreFinisherExercises once
+// each, so the same PR list applies whether you did it on a lift day or
+// an off-day. Nothing here needs equipment beyond an optional dumbbell.
+const coreTrackList = [
+  { key: "plank", name: "Plank Hold", unit: "sec" },
+  { key: "legRaises", name: "Leg Raises", unit: "reps" },
+  { key: "bicycleCrunches", name: "Bicycle Crunches", unit: "reps (each side)" },
+  { key: "plankHighKnees", name: "Plank High Knees", unit: "sec" },
+  { key: "russianTwists", name: "Russian Twists", unit: "reps (each side)" },
+  { key: "vUps", name: "V-Ups", unit: "reps" },
+  { key: "sidePlank", name: "Side Plank Reach-Unders", unit: "reps (each side)" },
+];
+
+const OFFCORE_XP_BONUS = 15; // matches STANDARD_DAY_XP_BONUS - a full core session earns the same as a full lift day
+
+// Full core routine for days you're not at the gym: the same Full and
+// Finisher lists used on Lower B, just not gated behind a lift day. None
+// of it needs a machine - the "weighted" versions just use an optional
+// light dumbbell or plate, skippable if you don't have one at home.
+function OffDayCorePage({ data, weights, exerciseHistory, onToggleCheck, onWeightChange, onLogHistory, onDeleteHistory }) {
+  const dateKey = getDateKey(new Date());
+  return (
+    <div style={{ padding: "20px" }}>
+      <div style={{ color: "#f9fafb", fontSize: "20px", fontWeight: "800", marginBottom: "2px" }}>Off-Day Core</div>
+      <div style={{ color: "#6b7280", fontSize: "13px", marginBottom: "20px" }}>Full core session for days you're not at the gym. No machines needed.</div>
+
+      <div style={{ marginBottom: "24px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
+          <div style={{ width: "3px", height: "18px", background: "#ec4899", borderRadius: "2px" }} />
+          <div style={{ color: "#ec4899", fontSize: "11px", letterSpacing: "3px", fontWeight: "700" }}>CORE</div>
+        </div>
+        {coreExercisesFull.map(ex => {
+          const checkKey = `${dateKey}_offcore_${ex.name.replace(/\s+/g, "_")}`;
+          return <CoreCard key={ex.name} exercise={ex} dayId="off" keyPrefix="offcore" weights={weights} exerciseHistory={exerciseHistory} onWeightChange={onWeightChange} onLogHistory={onLogHistory} onDeleteHistory={onDeleteHistory} checked={!!data.checks[checkKey]} onToggleCheck={() => onToggleCheck("core", ex.name)} />;
+        })}
+      </div>
+
+      <div style={{ marginBottom: "24px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+          <div style={{ width: "3px", height: "18px", background: "#f97316", borderRadius: "2px" }} />
+          <div style={{ color: "#f97316", fontSize: "11px", letterSpacing: "3px", fontWeight: "700" }}>CORE FINISHER</div>
+        </div>
+        {coreFinisherExercises.map(ex => {
+          const checkKey = `${dateKey}_offcorefinisher_${ex.name.replace(/\s+/g, "_")}`;
+          return <CoreCard key={ex.name} exercise={ex} dayId="off" keyPrefix="offcorefinisher" colorOverride="#f97316" weights={weights} exerciseHistory={exerciseHistory} onWeightChange={onWeightChange} onLogHistory={onLogHistory} onDeleteHistory={onDeleteHistory} checked={!!data.checks[checkKey]} onToggleCheck={() => onToggleCheck("corefinisher", ex.name)} />;
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ============================================================================
 // MAIN APP
 // ============================================================================
@@ -2909,6 +3008,7 @@ function GymPlanInner() {
     update({ exerciseHistory: { ...data.exerciseHistory, [key]: existing.filter((_, i) => i !== index) } });
   }
   function handleMaxSave(maxes) { update({ maxes }); }
+  function handleSaveCoreRecords(coreRecords) { update({ coreRecords }); }
   function handleSetEffort(sessionKey, effort) {
     const existing = data.sessionLog[sessionKey];
     if (!existing) return;
@@ -2960,6 +3060,39 @@ function GymPlanInner() {
   function handleSetProgramMode(mode) {
     update({ programMode: mode });
     setSelectedDay(0);
+  }
+
+  // Off-day core: same shape as Flex Day's completion check (date-scoped,
+  // not tied to any dayId), but two required lists (core + finisher)
+  // instead of one, and per-exercise XP like a normal lift day gets,
+  // since this is a full session, not a quick add-on.
+  function handleOffCoreToggle(kind, name) {
+    const dateKey = getDateKey(new Date());
+    const checkKey = `${dateKey}_off${kind}_${name.replace(/\s+/g, "_")}`;
+    const updated = { ...data.checks };
+    const wasChecked = !!updated[checkKey];
+    if (wasChecked) delete updated[checkKey]; else updated[checkKey] = true;
+    update({ checks: updated });
+
+    if (wasChecked) return;
+
+    const awards = [];
+    const list = kind === "core" ? coreExercisesFull : coreFinisherExercises;
+    const ex = list.find(e => e.name === name);
+    if (ex && ex.sets) {
+      awards.push({ reasonKey: `xp_offcore_${dateKey}_${kind}_${name.replace(/\s+/g, "_")}`, amount: ex.sets * PER_SET_XP, label: `${name} logged`, color: "#ec4899" });
+    }
+
+    const requiredKeys = [
+      ...coreExercisesFull.map(e => `${dateKey}_offcore_${e.name.replace(/\s+/g, "_")}`),
+      ...coreFinisherExercises.map(e => `${dateKey}_offcorefinisher_${e.name.replace(/\s+/g, "_")}`),
+    ];
+    const allChecked = requiredKeys.every(k => updated[k]);
+    if (allChecked) {
+      pushToast("Off-day core complete! 💪", "Full session done, no gym needed.", "#ec4899");
+      awards.push({ reasonKey: `xp_offcore_session_${dateKey}`, amount: OFFCORE_XP_BONUS, label: "Off-day core session", color: "#ec4899" });
+    }
+    if (awards.length) applyXpAwards(awards);
   }
 
   function handleFlexCheckToggle(kind, name) {
@@ -3175,6 +3308,7 @@ function GymPlanInner() {
   const navItems = [
     { key: "nutrition", label: "Nutrition" },
     { key: "workout", label: "Workout" },
+    { key: "offcore", label: "Core" },
     { key: "maxes", label: "5RM" },
     { key: "profile", label: "Progress" },
     { key: "results", label: "Results" },
@@ -3201,9 +3335,9 @@ function GymPlanInner() {
             </button>
           ))}
         </div>
-        <div style={{ display: "flex", gap: "6px", marginBottom: "16px" }}>
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", overflowX: "auto" }}>
           {navItems.map(n => (
-            <button key={n.key} onClick={() => setPage(n.key)} style={{ background: page === n.key ? "#f9fafb" : "#111827", color: page === n.key ? "#030712" : "#6b7280", border: "none", borderRadius: "8px", padding: "8px 16px", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>
+            <button key={n.key} onClick={() => setPage(n.key)} style={{ background: page === n.key ? "#f9fafb" : "#111827", color: page === n.key ? "#030712" : "#6b7280", border: "none", borderRadius: "8px", padding: "8px 16px", fontSize: "12px", fontWeight: "700", cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>
               {n.label}
             </button>
           ))}
@@ -3245,11 +3379,13 @@ function GymPlanInner() {
       {page === "profile" ? (
         <ProfilePage data={data} onUpdate={update} />
       ) : page === "maxes" ? (
-        <MaxTracker maxes={data.maxes} onSave={handleMaxSave} />
+        <MaxTracker maxes={data.maxes} onSave={handleMaxSave} coreRecords={data.coreRecords} onSaveCoreRecords={handleSaveCoreRecords} />
       ) : page === "nutrition" ? (
         <NutritionPage nutritionLog={data.nutritionLog} latestWeight={data.weightLog[data.weightLog.length - 1]?.weight} onAddEntry={handleAddNutritionEntry} onEditEntry={handleEditNutritionEntry} onDeleteEntry={handleDeleteNutritionEntry} />
       ) : page === "results" ? (
         <ResultsPage sessionLog={data.sessionLog} activityLog={data.activityLog} weight={data.weightLog[data.weightLog.length - 1]?.weight} onSetEffort={handleSetEffort} onLogActivity={handleLogActivity} onDeleteActivity={handleDeleteActivity} onEditDuration={handleEditDuration} />
+      ) : page === "offcore" ? (
+        <OffDayCorePage data={data} weights={data.weights} exerciseHistory={data.exerciseHistory} onToggleCheck={handleOffCoreToggle} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} onDeleteHistory={handleDeleteHistory} />
       ) : day.flex ? (
         <FlexDayPage data={data} weights={data.weights} exerciseHistory={data.exerciseHistory} onJumpToDay={handleJumpToDay} onJumpToMaxes={() => setPage("maxes")} onToggleFlexCheck={handleFlexCheckToggle} onWeightChange={handleWeightChange} onLogHistory={handleLogHistory} onDeleteHistory={handleDeleteHistory} zones={zones} />
       ) : (
